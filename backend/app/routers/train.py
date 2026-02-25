@@ -437,7 +437,7 @@ async def _run_training(project_id: UUID, item_id: str, collection: str) -> None
 
         _TRAIN_JOBS[key]["progress"] = 0.85
 
-        # ── 5. Fit model ─────────────────────────────────────────────────────
+        # ── 5. Phase 1 — fit on train split, evaluate on test split ──────────
         version = uuid.uuid4().hex[:8]
         _, metrics, artifact_path = await asyncio.to_thread(
             fit_model, X_train, y_train, X_test, y_test, model_config, version
@@ -446,19 +446,31 @@ async def _run_training(project_id: UUID, item_id: str, collection: str) -> None
         metrics["n_train_polygons"] = len(train_idx)
         metrics["n_test_polygons"] = len(test_idx)
 
-        # Copy to a predictable path so the prediction endpoint can always find
-        # the latest model without tracking version IDs.
-        latest_path = artifact_path.parent / f"model_{project_id}_latest.pkl"
-        shutil.copy(artifact_path, latest_path)
-
+        # Expose metrics to the frontend immediately so the user can see
+        # accuracy while phase 2 runs in the background.
         _TRAIN_JOBS[key] = {
             "status": "done",
+            "phase": "refitting",
             "progress": 1.0,
             "metrics": metrics,
             "error": None,
             "artifact": str(artifact_path),
         }
-        logger.info("Training complete for project %s: %s", project_id, metrics)
+        logger.info("Phase 1 complete for project %s: %s", project_id, metrics)
+
+        # ── 6. Phase 2 — refit on ALL data, overwrite _latest.pkl ────────────
+        X_all, y_all = _stack(list(range(len(poly_data))))
+        _, _, final_path = await asyncio.to_thread(
+            fit_model, X_all, y_all, None, None, model_config, f"{version}_full"
+        )
+        latest_path = final_path.parent / f"model_{project_id}_latest.pkl"
+        shutil.copy(final_path, latest_path)
+
+        _TRAIN_JOBS[key]["phase"] = "complete"
+        logger.info(
+            "Phase 2 complete for project %s — full model saved to %s",
+            project_id, latest_path,
+        )
 
     except Exception as exc:
         logger.exception("Training failed for project %s", project_id)

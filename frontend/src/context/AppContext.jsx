@@ -59,6 +59,10 @@ export function AppProvider({ children }) {
     const project = await getProject(projectId)
     setActiveProject(project)
     setShowWizard(false)
+    // Clear all per-project overlay state when switching projects
+    setPrediction(null)
+    setActiveScene(null)
+    setActiveBandCombo('true_color')
   }
 
   const showToast = useCallback((message, type = 'success') => {

@@ -47,7 +47,7 @@ def _read_band_part(
 
     try:
         with COGReader(href) as cog:
-            img = cog.part(bbox, max_size=max_size)
+            img = cog.part(bbox, max_size=max_size, nodata=0)
         arr = img.data[0].astype(np.float32)   # (H, W)
         mask = img.mask                         # (H, W) uint8: 255=valid 0=nodata
         return band_name, arr, mask

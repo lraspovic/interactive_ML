@@ -26,7 +26,11 @@ export default function TrainPanel() {
     try {
       const data = await getTrainStatus(activeProject.id)
       setJob(data)
-      if (data.status === 'done' || data.status === 'failed' || data.status === 'idle') {
+      const finished =
+        (data.status === 'done' && data.phase === 'complete') ||
+        data.status === 'failed' ||
+        data.status === 'idle'
+      if (finished) {
         stopPolling()
         if (data.status === 'done') {
           showToast(`Training complete — test acc ${data.metrics?.test_accuracy != null ? (data.metrics.test_accuracy * 100).toFixed(1) : (data.metrics?.train_accuracy * 100).toFixed(1)}%`)
@@ -39,16 +43,25 @@ export default function TrainPanel() {
     }
   }, [activeProject?.id, stopPolling, showToast])
 
-  // Start polling whenever a job transitions to "running"
+  // Start/continue polling while running or while refitting on full data
   useEffect(() => {
-    if (job?.status === 'running' && !pollRef.current) {
+    const shouldPoll =
+      job?.status === 'running' ||
+      (job?.status === 'done' && job?.phase === 'refitting')
+    if (shouldPoll && !pollRef.current) {
       pollRef.current = setInterval(pollStatus, 2000)
     }
     return () => {}
-  }, [job?.status, pollStatus])
+  }, [job?.status, job?.phase, pollStatus])
 
   // Cleanup on unmount
   useEffect(() => () => stopPolling(), [stopPolling])
+
+  // Clear local state whenever the active project changes
+  useEffect(() => {
+    stopPolling()
+    setJob(null)
+  }, [activeProject?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch status on mount so we pick up any in-progress job from before
   useEffect(() => {
@@ -70,7 +83,7 @@ export default function TrainPanel() {
     }
   }
 
-  const isRunning = job?.status === 'running'
+  const isRunning = job?.status === 'running' || (job?.status === 'done' && job?.phase === 'refitting')
   const canTrain = activeProject && activeScene && classesWithSamples.size >= 2 && !isRunning
 
   return (
@@ -120,7 +133,7 @@ export default function TrainPanel() {
           </div>
 
           {/* Progress bar */}
-          {isRunning && (
+          {job?.status === 'running' && (
             <div className="train-progress-wrap">
               <div
                 className="train-progress-bar"
@@ -129,6 +142,14 @@ export default function TrainPanel() {
               <span className="train-progress-label">
                 Extracting pixels… {Math.round((job.progress ?? 0) * 100)}%
               </span>
+            </div>
+          )}
+
+          {/* Refitting indicator */}
+          {job?.status === 'done' && job?.phase === 'refitting' && (
+            <div className="train-progress-wrap">
+              <div className="train-progress-bar train-progress-pulse" style={{ width: '100%' }} />
+              <span className="train-progress-label">Refitting on full dataset…</span>
             </div>
           )}
 
@@ -162,6 +183,12 @@ export default function TrainPanel() {
               <div className="train-metric-row">
                 <span>Model</span>
                 <strong>{job.metrics.model_type?.replace('_', ' ')}</strong>
+              </div>
+              <div className="train-metric-row">
+                <span>Full data</span>
+                <strong style={{ color: job.phase === 'complete' ? '#22c55e' : 'var(--text-secondary)' }}>
+                  {job.phase === 'complete' ? '✓ retrained on all polygons' : '⏳ refitting…'}
+                </strong>
               </div>
             </div>
           )}

@@ -56,7 +56,13 @@ export default function PredictPanel() {
 
   useEffect(() => () => stopPolling(), [stopPolling])
 
-  // Restore any existing prediction state on mount
+  // Clear local state whenever the active project changes
+  useEffect(() => {
+    stopPolling()
+    setJob(null)
+  }, [activeProject?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Restore any existing prediction state after the project is loaded
   useEffect(() => {
     if (activeProject?.id) pollStatus()
   }, [activeProject?.id, pollStatus])

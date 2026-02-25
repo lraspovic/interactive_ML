@@ -1,0 +1,120 @@
+/* ── Panel shell ─────────────────────────────────── */
+.class-panel {
+  border: 1px solid var(--sidebar-border, #2a2e42);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+/* ── Header ──────────────────────────────────────── */
+.class-panel-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #12141f;
+  border: none;
+  cursor: pointer;
+  color: var(--text-primary, #e8eaf0);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.class-panel-header:hover {
+  background: #1a1d2e;
+}
+
+.class-panel-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.class-panel-title {
+  flex: 1;
+}
+
+.class-panel-badge {
+  font-size: 0.68rem;
+  background: var(--accent, #4f8ef7);
+  color: #fff;
+  border-radius: 10px;
+  padding: 2px 7px;
+  font-weight: 700;
+}
+
+.class-panel-chevron {
+  font-size: 1.1rem;
+  color: var(--text-secondary, #8b90a7);
+  line-height: 1;
+}
+
+/* ── Body ────────────────────────────────────────── */
+.class-panel-body {
+  padding: 10px 12px 12px;
+  background: #0d0f1a;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.class-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  list-style: none;
+}
+
+.class-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+  border: 1px solid transparent;
+}
+
+.class-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.class-item.selected {
+  background: rgba(79, 142, 247, 0.12);
+  border-color: rgba(79, 142, 247, 0.3);
+}
+
+.class-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.class-name {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.class-count {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.07);
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+
+.class-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  border-left: 2px solid var(--accent);
+}

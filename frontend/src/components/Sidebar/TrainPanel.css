@@ -1,0 +1,189 @@
+/* ── Panel shell ─────────────────────────────────── */
+.train-panel {
+  border: 1px solid var(--sidebar-border, #2a2e42);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+/* ── Header ──────────────────────────────────────── */
+.train-panel-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #12141f;
+  border: none;
+  cursor: pointer;
+  color: var(--text-primary, #e8eaf0);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.train-panel-header:hover {
+  background: #1a1d2e;
+}
+
+.train-panel-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.train-panel-title {
+  flex: 1;
+}
+
+.train-panel-badge {
+  font-size: 0.68rem;
+  background: #22c55e;
+  color: #fff;
+  border-radius: 10px;
+  padding: 2px 7px;
+  font-weight: 700;
+}
+
+.train-panel-chevron {
+  font-size: 1.1rem;
+  color: var(--text-secondary, #8b90a7);
+  line-height: 1;
+}
+
+/* ── Body ────────────────────────────────────────── */
+.train-panel-body {
+  padding: 10px 12px 12px;
+  background: #0d0f1a;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── Hint text ───────────────────────────────────── */
+.train-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary, #8b90a7);
+  line-height: 1.4;
+}
+
+/* ── Scene / sample info row ─────────────────────── */
+.train-scene-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78rem;
+  gap: 6px;
+}
+
+.train-scene-label {
+  color: var(--text-secondary, #8b90a7);
+  white-space: nowrap;
+}
+
+.train-scene-value {
+  color: var(--text-primary, #e8eaf0);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+/* ── Progress bar ────────────────────────────────── */
+.train-progress-wrap {
+  position: relative;
+  background: #1e2136;
+  border-radius: 6px;
+  height: 22px;
+  overflow: hidden;
+}
+
+.train-progress-bar {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, #4f8ef7, #7c3aed);
+  border-radius: 6px;
+  transition: width 0.4s ease;
+  min-width: 4px;
+}
+
+.train-progress-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  color: #fff;
+  font-weight: 600;
+  z-index: 1;
+}
+
+/* ── Metrics ─────────────────────────────────────── */
+.train-metrics {
+  background: #1a1d2e;
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.train-metric-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  gap: 8px;
+}
+
+.train-metric-row span {
+  color: var(--text-secondary, #8b90a7);
+}
+
+.train-metric-row strong {
+  color: var(--text-primary, #e8eaf0);
+  font-weight: 600;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+
+/* ── Error ───────────────────────────────────────── */
+.train-error {
+  margin: 0;
+  font-size: 0.77rem;
+  color: #f87171;
+  background: #2a1515;
+  border: 1px solid #5a1e1e;
+  border-radius: 6px;
+  padding: 6px 8px;
+  line-height: 1.4;
+}
+
+/* ── Train button ────────────────────────────────── */
+.train-btn {
+  width: 100%;
+  padding: 9px 0;
+  background: #4f8ef7;
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+  margin-top: 2px;
+}
+
+.train-btn:hover:not(:disabled) {
+  background: #3b79e5;
+}
+
+.train-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

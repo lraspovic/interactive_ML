@@ -1,0 +1,172 @@
+/* ── Drawer shell ─────────────────────────────────── */
+.feature-table-drawer {
+  flex-shrink: 0;
+  background: #0d0f1a;
+  border-top: 1px solid var(--sidebar-border, #2e3245);
+  display: flex;
+  flex-direction: column;
+  /* collapsed: only handle visible */
+  max-height: 40px;
+  transition: max-height 0.25s ease;
+  overflow: hidden;
+}
+
+.feature-table-drawer--open {
+  max-height: 360px;
+}
+
+/* ── Handle bar ──────────────────────────────────── */
+.feature-table-handle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0 16px;
+  background: #12141f;
+  border: none;
+  cursor: pointer;
+  color: var(--text-primary, #e8eaf0);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: left;
+  width: 100%;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.feature-table-handle:hover {
+  background: #1a1d2e;
+}
+
+.feature-table-handle-icon {
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.feature-table-handle-title {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.feature-table-badge {
+  font-size: 0.67rem;
+  background: #4f8ef7;
+  color: #fff;
+  border-radius: 10px;
+  padding: 1px 6px;
+  font-weight: 700;
+}
+
+.feature-table-hint {
+  font-size: 0.72rem;
+  color: var(--text-secondary, #8b90a7);
+  font-weight: 400;
+}
+
+.feature-table-handle-refresh {
+  font-size: 1rem;
+  color: var(--text-secondary, #8b90a7);
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+  transition: color 0.15s, background 0.15s;
+}
+
+.feature-table-handle-refresh:hover {
+  color: var(--text-primary, #e8eaf0);
+  background: #2a2e42;
+}
+
+.feature-table-download {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: #4f8ef7;
+  background: rgba(79, 142, 247, 0.12);
+  border: 1px solid rgba(79, 142, 247, 0.3);
+  border-radius: 5px;
+  padding: 2px 8px;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.feature-table-download:hover {
+  background: rgba(79, 142, 247, 0.22);
+  border-color: #4f8ef7;
+}
+
+.feature-table-chevron {
+  font-size: 0.9rem;
+  color: var(--text-secondary, #8b90a7);
+}
+
+/* ── Scrollable table area ───────────────────────── */
+.feature-table-scroll {
+  overflow-x: auto;
+  overflow-y: auto;
+  flex: 1;
+  padding: 0 0 4px;
+}
+
+.feature-table-empty {
+  padding: 12px 16px;
+  font-size: 0.78rem;
+  color: var(--text-secondary, #8b90a7);
+}
+
+/* ── Table ───────────────────────────────────────── */
+.feature-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.77rem;
+  white-space: nowrap;
+}
+
+.feature-table thead th {
+  position: sticky;
+  top: 0;
+  background: #12141f;
+  color: var(--text-secondary, #8b90a7);
+  font-weight: 600;
+  padding: 5px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--sidebar-border, #2e3245);
+  z-index: 1;
+}
+
+.feature-table thead th.feature-table-num {
+  text-align: right;
+}
+
+.feature-table tbody tr {
+  border-bottom: 1px solid #1a1d2e;
+  transition: background 0.1s;
+}
+
+.feature-table tbody tr:hover {
+  background: #15182a;
+}
+
+.feature-table tbody td {
+  padding: 5px 12px;
+  color: var(--text-primary, #e8eaf0);
+}
+
+.feature-table-label {
+  font-weight: 600;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.feature-table-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.feature-table-value {
+  color: #93c5fd;  /* light blue to distinguish from metadata columns */
+}

@@ -1,0 +1,25 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --sidebar-width: 420px;
+  --sidebar-bg: #1c1f2e;
+  --sidebar-header-bg: #12141f;
+  --sidebar-border: #2e3245;
+  --accent: #4f8ef7;
+  --accent-hover: #3a7aee;
+  --text-primary: #e8eaf0;
+  --text-secondary: #8b90a7;
+  --font: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--font);
+  font-size: 17px;
+}

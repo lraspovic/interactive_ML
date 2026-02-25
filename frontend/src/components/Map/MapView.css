@@ -1,0 +1,24 @@
+.map-container {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  z-index: 0;
+}
+
+/* Override Leaflet default z-indices to play nice with sidebar */
+.leaflet-control-container .leaflet-top,
+.leaflet-control-container .leaflet-bottom {
+  z-index: 800;
+}
+
+/* Geoman toolbar tweaks */
+.leaflet-pm-toolbar .leaflet-pm-icon {
+  border-radius: 4px;
+}
+
+/* Custom attribution style */
+.leaflet-control-attribution {
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.75) !important;
+  backdrop-filter: blur(4px);
+}

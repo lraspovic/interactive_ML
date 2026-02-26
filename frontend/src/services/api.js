@@ -176,3 +176,8 @@ export function getPredictImageUrl(projectId, bust) {
 export function getUncertaintyImageUrl(projectId, bust) {
   return `${BASE}/predict/uncertainty/${projectId}?t=${bust}`
 }
+
+/** Returns the URL for the debug GeoTIFF download (raw bands used for last prediction). */
+export function getDebugTiffUrl(projectId) {
+  return `${BASE}/predict/debug-tiff/${projectId}`
+}

@@ -20,6 +20,11 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Target ground sample distance used for all feature reads.
+# Every band (10 m or 20 m native) is resampled to this resolution so that
+# pixel indices are spatially aligned across all bands.
+TARGET_GSD = 10.0  # metres
+
 # Logical band name (from wizard Step 3) → Sentinel-2 L2A STAC asset key.
 # Only Sentinel-2 L2A is supported for now; extend this map for other collections.
 S2_BAND_TO_ASSET: dict[str, str] = {
@@ -71,31 +76,83 @@ def _read_band_pixels(
     href: str,
     geometry: dict,
     band_name: str,
-) -> tuple[str, np.ndarray | None]:
+    target_shape: tuple[int, int] | None = None,
+) -> tuple[str, np.ndarray | None, np.ndarray | None]:
     """
     Read pixels inside *geometry* from one COG asset.
+
+    All bands are resampled to *target_shape* (rows, cols) so that pixel
+    indices are spatially aligned regardless of native band resolution
+    (e.g. 10 m vs 20 m Sentinel-2 bands).
 
     Uses HTTP range requests — only the bytes covering the polygon bbox
     are downloaded from Azure Blob Storage.
 
-    Returns (band_name, 1D float32 pixel array) or (band_name, None) on failure.
+    Returns (band_name, 2D float32 array, 2D bool valid_mask)
+    or (band_name, None, None) on failure.
     """
-    from rio_tiler.io import COGReader
+    import rasterio
+    import rasterio.features as rio_feat
+    from rasterio import windows, warp
+    from rasterio.transform import from_bounds as transform_from_bounds
+    from shapely.geometry import shape, mapping
+    from shapely.ops import transform as shp_transform
+    from pyproj import Transformer
 
-    # rio_tiler.feature() accepts a GeoJSON Feature dict
-    geojson_feature = {"type": "Feature", "geometry": geometry, "properties": {}}
     try:
-        with COGReader(href) as cog:
-            img = cog.feature(geojson_feature, nodata=0)
-        # img.mask: (H, W) uint8 — 255 = valid pixel, 0 = nodata / outside polygon
-        valid = img.mask.ravel() > 0
-        if not valid.any():
-            return band_name, None
-        pixels = img.data[0].ravel()[valid].astype(np.float32)
-        return band_name, pixels
+        with rasterio.open(href) as ds:
+            # Transform polygon bbox from WGS84 to native COG CRS
+            aoi_bounds = rio_feat.bounds(geometry)   # (minx, miny, maxx, maxy) WGS84
+            native_bounds = warp.transform_bounds("epsg:4326", ds.crs, *aoi_bounds)
+            win = windows.from_bounds(*native_bounds, transform=ds.transform)
+            win = win.intersection(windows.Window(0, 0, ds.width, ds.height))
+            if win.width <= 0 or win.height <= 0:
+                return band_name, None, None
+
+            # Determine output shape: use caller-supplied target or derive from
+            # the native extent at TARGET_GSD so every band lands on the same grid.
+            if target_shape is None:
+                extent_x = native_bounds[2] - native_bounds[0]
+                extent_y = native_bounds[3] - native_bounds[1]
+                tgt_w = max(1, round(extent_x / TARGET_GSD))
+                tgt_h = max(1, round(extent_y / TARGET_GSD))
+                target_shape = (tgt_h, tgt_w)
+
+            out_h, out_w = target_shape
+
+            # Read at target_shape — rasterio bilinear-resamples 20 m → 10 m
+            data = ds.read(
+                1,
+                window=win,
+                out_shape=(out_h, out_w),
+                resampling=rasterio.enums.Resampling.bilinear,
+            ).astype(np.float32)
+
+            # Transform for the resampled output grid
+            out_transform = transform_from_bounds(
+                native_bounds[0], native_bounds[1],
+                native_bounds[2], native_bounds[3],
+                out_w, out_h,
+            )
+
+            # Build polygon mask in native CRS at output resolution
+            t = Transformer.from_crs(4326, ds.crs, always_xy=True)
+            native_geom = shp_transform(t.transform, shape(geometry))
+            poly_mask = rio_feat.geometry_mask(
+                [mapping(native_geom)],
+                out_shape=(out_h, out_w),
+                transform=out_transform,
+                invert=True,
+            )
+            nodata_val = ds.nodata if ds.nodata is not None else 0
+            valid = poly_mask & (data != nodata_val)
+            if not valid.any():
+                return band_name, None, None
+
+        return band_name, data, valid
     except Exception as exc:
         logger.warning("Feature read failed for band %s: %s", band_name, exc)
-        return band_name, None
+        return band_name, None, None
 
 
 def extract_pixel_features(
@@ -132,23 +189,50 @@ def extract_pixel_features(
         logger.warning("No matching assets found for bands %s", available_bands)
         return None, []
 
-    # Fetch all bands in parallel
-    band_pixels: dict[str, np.ndarray] = {}
+    # Pre-compute a shared target_shape at TARGET_GSD from the first available
+    # band's native UTM extent.  All bands (10 m and 20 m native) will be read
+    # at this same grid so pixel indices are spatially consistent.
+    target_shape: tuple[int, int] | None = None
+    try:
+        import rasterio
+        import rasterio.features as rio_feat
+        from rasterio import warp
+        first_href = next(iter(band_hrefs.values()))
+        aoi_bounds = rio_feat.bounds(geometry)
+        with rasterio.open(first_href) as ds:
+            native_bounds = warp.transform_bounds("epsg:4326", ds.crs, *aoi_bounds)
+        extent_x = native_bounds[2] - native_bounds[0]
+        extent_y = native_bounds[3] - native_bounds[1]
+        tgt_w = max(1, round(extent_x / TARGET_GSD))
+        tgt_h = max(1, round(extent_y / TARGET_GSD))
+        target_shape = (tgt_h, tgt_w)
+    except Exception as exc:
+        logger.warning("Could not pre-compute target_shape, falling back to native: %s", exc)
+
+    # Fetch all bands in parallel, resampled to the shared target_shape
+    band_arrays: dict[str, np.ndarray] = {}   # 2D float32
+    band_masks:  dict[str, np.ndarray] = {}   # 2D bool (valid pixels)
     with ThreadPoolExecutor(max_workers=len(band_hrefs)) as pool:
         futures = {
-            pool.submit(_read_band_pixels, href, geometry, band_name): band_name
+            pool.submit(_read_band_pixels, href, geometry, band_name, target_shape): band_name
             for band_name, href in band_hrefs.items()
         }
         for future in as_completed(futures):
-            band_name, pixels = future.result()
-            if pixels is not None:
-                band_pixels[band_name] = pixels
+            band_name, arr, valid = future.result()
+            if arr is not None:
+                band_arrays[band_name] = arr
+                band_masks[band_name]  = valid
 
-    if not band_pixels:
+    if not band_arrays:
         return None, []
 
-    # Snap all bands to the minimum pixel count (guards against edge-case mismatches)
-    n_pixels = min(len(p) for p in band_pixels.values())
+    # Intersect all valid masks so every feature row refers to the same ground pixel.
+    # A pixel is included only if it is valid (inside polygon, not nodata) in ALL bands.
+    combined_mask: np.ndarray = np.ones(next(iter(band_masks.values())).shape, dtype=bool)
+    for m in band_masks.values():
+        combined_mask &= m
+
+    n_pixels = int(combined_mask.sum())
     if n_pixels == 0:
         return None, []
 
@@ -156,19 +240,25 @@ def extract_pixel_features(
     feature_cols: list[np.ndarray] = []
     feature_names: list[str] = []
 
+    # 1D pixel vectors extracted at the shared mask
+    flat_pixels: dict[str, np.ndarray] = {
+        b: arr[combined_mask].astype(np.float32)
+        for b, arr in band_arrays.items()
+    }
+
     for logical in available_bands:
-        if logical in band_pixels:
-            feature_cols.append(band_pixels[logical][:n_pixels])
+        if logical in flat_pixels:
+            feature_cols.append(flat_pixels[logical])
             feature_names.append(logical)
 
     for idx_name in enabled_indices:
         spec = SPECTRAL_INDICES.get(idx_name.upper())  # wizard stores lowercase, registry is uppercase
         if spec is None:
             continue
-        if not spec["requires"].issubset(set(band_pixels.keys())):
+        if not spec["requires"].issubset(set(flat_pixels.keys())):
             logger.debug("Skipping %s — missing required bands", idx_name)
             continue
-        idx_values = spec["fn"]({k: v[:n_pixels] for k, v in band_pixels.items()})
+        idx_values = spec["fn"](flat_pixels)
         feature_cols.append(idx_values.astype(np.float32))
         feature_names.append(idx_name.upper())  # normalize to uppercase for display
 

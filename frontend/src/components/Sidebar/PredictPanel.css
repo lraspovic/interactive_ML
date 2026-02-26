@@ -193,6 +193,21 @@
   color: var(--text-primary, #e8eaf0);
 }
 
+/* ── Debug TIFF download link ───────────────────── */
+.predict-debug-link {
+  display: block;
+  font-size: 0.72rem;
+  color: #94a3b8;
+  text-decoration: none;
+  padding: 4px 0 6px;
+  opacity: 0.75;
+  transition: opacity 0.15s;
+}
+.predict-debug-link:hover {
+  opacity: 1;
+  color: #cbd5e1;
+}
+
 /* ── Error ──────────────────────────────────────── */
 .predict-error {
   margin: 0;

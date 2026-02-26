@@ -13,6 +13,8 @@ import logging
 import pickle
 import time
 from pathlib import Path
+
+import numpy as np
 from typing import Any
 from uuid import UUID
 
@@ -24,6 +26,7 @@ from sqlalchemy import select
 from app.database import AsyncSessionLocal
 from app.ml.predictor import (
     extract_bbox_features,
+    read_raw_bands_tiff,
     render_prediction_png,
     render_uncertainty_png,
 )
@@ -66,11 +69,14 @@ async def trigger_predict(body: PredictRequest, background_tasks: BackgroundTask
         raise HTTPException(status_code=409, detail="Prediction already in progress")
 
     _PREDICT_JOBS[key] = {
-        "status": "running",
-        "progress": 0.0,
-        "bbox": body.bbox,
-        "timestamp": None,
-        "error": None,
+        "status":      "running",
+        "progress":    0.0,
+        "bbox":        body.bbox,
+        "actual_bbox": None,
+        "item_id":     body.item_id,
+        "collection":  body.collection,
+        "timestamp":   None,
+        "error":       None,
     }
     background_tasks.add_task(
         _run_prediction,
@@ -87,11 +93,12 @@ async def predict_status(project_id: UUID = Query(...)):
     """Return the current prediction job state for a project."""
     key = str(project_id)
     job = _PREDICT_JOBS.get(key, {
-        "status": "idle",
-        "progress": 0.0,
-        "bbox": None,
-        "timestamp": None,
-        "error": None,
+        "status":      "idle",
+        "progress":    0.0,
+        "bbox":        None,
+        "actual_bbox": None,
+        "timestamp":   None,
+        "error":       None,
     })
     return {"project_id": key, **job}
 
@@ -112,6 +119,65 @@ async def uncertainty_image(project_id: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="No uncertainty map found.")
     return FileResponse(str(path), media_type="image/png")
+
+
+@router.get("/debug-tiff/{project_id}")
+async def prediction_debug_tiff(project_id: str):
+    """
+    Download the raw band raster used for the last prediction as a georeferenced
+    multi-band GeoTIFF (float32, EPSG:4326).  One band per available_bands entry;
+    band names stored as raster tags.  Open in QGIS to inspect pixel values.
+    """
+    from uuid import UUID as _UUID
+    from fastapi.responses import Response as _Response
+
+    job = _PREDICT_JOBS.get(project_id)
+    if not job or job.get("status") not in ("done", "failed", "running"):
+        raise HTTPException(
+            status_code=404,
+            detail="No prediction job found for this project. Run a prediction first.",
+        )
+
+    bbox = job.get("actual_bbox") or job.get("bbox")
+    item_id = job.get("item_id")
+    collection = job.get("collection", "sentinel-2-l2a")
+
+    if not bbox or not item_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Scene / bbox info not available — start a new prediction first.",
+        )
+
+    try:
+        pid = _UUID(project_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=422, detail="Invalid project_id format.")
+
+    async with AsyncSessionLocal() as db:
+        project = await db.get(Project, pid)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        available_bands: list[str] = project.available_bands or ["blue", "green", "red"]
+        enabled_indices: list[str] = project.enabled_indices or []
+
+    signed_assets = await asyncio.to_thread(_get_signed_assets, collection, item_id)
+    tiff_bytes = await asyncio.to_thread(
+        read_raw_bands_tiff, bbox, signed_assets, available_bands, enabled_indices
+    )
+
+    if not tiff_bytes:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not read any band data for this bbox/scene.",
+        )
+
+    short_id = project_id[:8]
+    filename = f"debug_{short_id}_{item_id[:20]}.tif"
+    return _Response(
+        content=tiff_bytes,
+        media_type="image/tiff",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -152,13 +218,15 @@ async def _run_prediction(
         _PREDICT_JOBS[key]["progress"] = 0.25
 
         # ── 4. Extract bbox features ──────────────────────────────────────────
-        X, H, W, valid_mask, feature_names = await asyncio.to_thread(
+        X, H, W, valid_mask, feature_names, actual_bbox = await asyncio.to_thread(
             extract_bbox_features,
             bbox,
             signed_assets,
             available_bands,
             enabled_indices,
         )
+        # Fall back to the requested bbox if rio_tiler didn't report actual bounds
+        actual_bbox = actual_bbox or bbox
 
         if X is None or H == 0 or W == 0:
             raise ValueError(
@@ -166,11 +234,31 @@ async def _run_prediction(
                 "Try zooming in or selecting a different scene."
             )
 
+        n_valid = int(valid_mask.sum())
+        logger.info(
+            "Prediction features: %d×%d px, %d valid (%.1f%%), %d features, "
+            "value range [%.1f, %.1f]",
+            H, W, n_valid, 100 * n_valid / (H * W),
+            X.shape[1],
+            float(X[valid_mask].min()) if n_valid else 0,
+            float(X[valid_mask].max()) if n_valid else 0,
+        )
+
         _PREDICT_JOBS[key]["progress"] = 0.70
 
         # ── 5. Run prediction + uncertainty ───────────────────────────────────
-        predictions = model.predict(X)        # (H*W,) int
-        probas      = model.predict_proba(X)  # (H*W, n_classes)
+        # Only predict on valid pixels (nodata pixels have all-zero features and
+        # were excluded during training — feeding them to the model causes them
+        # to be assigned an arbitrary class, polluting the result).
+        n_pixels = H * W
+        n_classes = len(model.classes_)
+        predictions = np.full(n_pixels, -1, dtype=np.int32)
+        probas      = np.zeros((n_pixels, n_classes), dtype=np.float32)
+
+        if valid_mask.any():
+            X_valid = X[valid_mask]
+            predictions[valid_mask] = model.predict(X_valid)
+            probas[valid_mask]      = model.predict_proba(X_valid)
 
         _PREDICT_JOBS[key]["progress"] = 0.85
 
@@ -191,12 +279,15 @@ async def _run_prediction(
         (MODEL_ARTIFACTS_DIR / f"uncertainty_{project_id}.png").write_bytes(unc_png)
 
         _PREDICT_JOBS[key] = {
-            "status":     "done",
-            "progress":   1.0,
-            "bbox":       bbox,
-            "timestamp":  int(time.time()),
-            "error":      None,
-            "image_size": [W, H],
+            "status":      "done",
+            "progress":    1.0,
+            "bbox":        bbox,
+            "actual_bbox": actual_bbox,
+            "item_id":     item_id,
+            "collection":  collection,
+            "timestamp":   int(time.time()),
+            "error":       None,
+            "image_size":  [W, H],
         }
         logger.info(
             "Prediction complete for project %s — %d×%d px, %d classes",
@@ -206,9 +297,12 @@ async def _run_prediction(
     except Exception as exc:
         logger.exception("Prediction failed for project %s", project_id)
         _PREDICT_JOBS[key] = {
-            "status":    "failed",
-            "progress":  0.0,
-            "bbox":      bbox,
-            "timestamp": None,
-            "error":     str(exc),
+            "status":      "failed",
+            "progress":    0.0,
+            "bbox":        bbox,
+            "actual_bbox": None,
+            "item_id":     item_id,
+            "collection":  collection,
+            "timestamp":   None,
+            "error":       str(exc),
         }

@@ -1,7 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import './PredictPanel.css'
-import { useAppContext } from '../../context/AppContext'
-import { triggerPredict, getPredictStatus } from '../../services/api'
+import { useState, useEffect, useRef, useCallback } from "react";
+import "./PredictPanel.css";
+import { useAppContext } from "../../context/AppContext";
+import {
+  triggerPredict,
+  getPredictStatus,
+  getDebugTiffUrl,
+} from "../../services/api";
 
 export default function PredictPanel() {
   const {
@@ -16,95 +20,117 @@ export default function PredictPanel() {
     uncertaintyOpacity,
     setUncertaintyOpacity,
     showToast,
-  } = useAppContext()
+  } = useAppContext();
 
-  const [open, setOpen] = useState(true)
-  const [job, setJob] = useState(null)   // null | { status, progress, bbox, timestamp, error }
-  const pollRef = useRef(null)
+  const [open, setOpen] = useState(true);
+  const [job, setJob] = useState(null); // null | { status, progress, bbox, timestamp, error }
+  const pollRef = useRef(null);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
+      clearInterval(pollRef.current);
+      pollRef.current = null;
     }
-  }, [])
+  }, []);
 
   const pollStatus = useCallback(async () => {
-    if (!activeProject?.id) return
+    if (!activeProject?.id) return;
     try {
-      const data = await getPredictStatus(activeProject.id)
-      setJob(data)
-      if (data.status === 'done') {
-        stopPolling()
-        setPrediction({ bbox: data.bbox, timestamp: data.timestamp })
-        showToast('Prediction complete')
-      } else if (data.status === 'failed') {
-        stopPolling()
-        showToast(data.error || 'Prediction failed', 'error')
+      const data = await getPredictStatus(activeProject.id);
+      setJob(data);
+      if (data.status === "done") {
+        stopPolling();
+        setPrediction({
+          bbox: data.bbox,
+          actual_bbox: data.actual_bbox,
+          timestamp: data.timestamp,
+        });
+        showToast("Prediction complete");
+      } else if (data.status === "failed") {
+        stopPolling();
+        showToast(data.error || "Prediction failed", "error");
       }
     } catch {
-      stopPolling()
+      stopPolling();
     }
-  }, [activeProject?.id, stopPolling, setPrediction, showToast])
+  }, [activeProject?.id, stopPolling, setPrediction, showToast]);
 
   useEffect(() => {
-    if (job?.status === 'running' && !pollRef.current) {
-      pollRef.current = setInterval(pollStatus, 2000)
+    if (job?.status === "running" && !pollRef.current) {
+      pollRef.current = setInterval(pollStatus, 2000);
     }
-    return () => {}
-  }, [job?.status, pollStatus])
+    return () => {};
+  }, [job?.status, pollStatus]);
 
-  useEffect(() => () => stopPolling(), [stopPolling])
+  useEffect(() => () => stopPolling(), [stopPolling]);
 
   // Clear local state whenever the active project changes
   useEffect(() => {
-    stopPolling()
-    setJob(null)
-  }, [activeProject?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+    stopPolling();
+    setJob(null);
+  }, [activeProject?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Restore any existing prediction state after the project is loaded
   useEffect(() => {
-    if (activeProject?.id) pollStatus()
-  }, [activeProject?.id, pollStatus])
+    if (activeProject?.id) pollStatus();
+  }, [activeProject?.id, pollStatus]);
 
   async function handlePredict() {
-    if (!activeProject || !activeScene || !mapBounds) return
-    const bbox = [mapBounds.minLon, mapBounds.minLat, mapBounds.maxLon, mapBounds.maxLat]
+    if (!activeProject || !activeScene || !mapBounds) return;
+    const bbox = [
+      mapBounds.minLon,
+      mapBounds.minLat,
+      mapBounds.maxLon,
+      mapBounds.maxLat,
+    ];
     try {
       await triggerPredict({
         project_id: activeProject.id,
         item_id: activeScene.id,
         collection: activeScene.collection,
         bbox,
-      })
-      setJob({ status: 'running', progress: 0, bbox, timestamp: null, error: null })
-      pollRef.current = setInterval(pollStatus, 2000)
+      });
+      setJob({
+        status: "running",
+        progress: 0,
+        bbox,
+        timestamp: null,
+        error: null,
+      });
+      pollRef.current = setInterval(pollStatus, 2000);
     } catch (e) {
-      showToast(e.message || 'Failed to start prediction', 'error')
+      showToast(e.message || "Failed to start prediction", "error");
     }
   }
 
-  const isRunning = job?.status === 'running'
-  const hasPrediction = job?.status === 'done' || prediction != null
-  const canPredict = activeProject && activeScene && mapBounds && !isRunning
+  const isRunning = job?.status === "running";
+  const hasPrediction = job?.status === "done" || prediction != null;
+  const canPredict = activeProject && activeScene && mapBounds && !isRunning;
 
   return (
     <div className="predict-panel">
-      <button className="predict-panel-header" onClick={() => setOpen(o => !o)}>
+      <button
+        className="predict-panel-header"
+        onClick={() => setOpen((o) => !o)}
+      >
         <span className="predict-panel-icon">🗺️</span>
         <span className="predict-panel-title">Prediction</span>
         {hasPrediction && <span className="predict-panel-badge">Ready</span>}
-        <span className="predict-panel-chevron">{open ? '▾' : '▸'}</span>
+        <span className="predict-panel-chevron">{open ? "▾" : "▸"}</span>
       </button>
 
       {open && (
         <div className="predict-panel-body">
           {/* Requirements hints */}
           {!activeScene && (
-            <p className="predict-hint">🛰️ Select a satellite scene to run prediction.</p>
+            <p className="predict-hint">
+              🛰️ Select a satellite scene to run prediction.
+            </p>
           )}
           {!mapBounds && activeScene && (
-            <p className="predict-hint">🗺️ Pan the map to set a viewport first.</p>
+            <p className="predict-hint">
+              🗺️ Pan the map to set a viewport first.
+            </p>
           )}
 
           {/* Progress bar */}
@@ -125,9 +151,15 @@ export default function PredictPanel() {
             className="predict-btn"
             onClick={handlePredict}
             disabled={!canPredict}
-            title={!activeScene ? 'Select a scene first' : !mapBounds ? 'Pan the map first' : 'Predict on current viewport'}
+            title={
+              !activeScene
+                ? "Select a scene first"
+                : !mapBounds
+                  ? "Pan the map first"
+                  : "Predict on current viewport"
+            }
           >
-            {isRunning ? '⏳ Predicting…' : '▶ Run Prediction'}
+            {isRunning ? "⏳ Predicting…" : "▶ Run Prediction"}
           </button>
 
           {/* Overlays + legend — only shown when a prediction exists */}
@@ -136,9 +168,12 @@ export default function PredictPanel() {
               <div className="predict-opacity-row">
                 <label>Classification</label>
                 <input
-                  type="range" min={0} max={1} step={0.05}
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
                   value={predictionOpacity}
-                  onChange={e => setPredictionOpacity(+e.target.value)}
+                  onChange={(e) => setPredictionOpacity(+e.target.value)}
                 />
                 <span>{Math.round(predictionOpacity * 100)}%</span>
               </div>
@@ -146,9 +181,12 @@ export default function PredictPanel() {
               <div className="predict-opacity-row">
                 <label>Uncertainty</label>
                 <input
-                  type="range" min={0} max={1} step={0.05}
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
                   value={uncertaintyOpacity}
-                  onChange={e => setUncertaintyOpacity(+e.target.value)}
+                  onChange={(e) => setUncertaintyOpacity(+e.target.value)}
                 />
                 <span>{Math.round(uncertaintyOpacity * 100)}%</span>
               </div>
@@ -158,9 +196,12 @@ export default function PredictPanel() {
                 <div className="predict-legend">
                   <span className="predict-legend-title">Legend</span>
                   <ul className="predict-legend-list">
-                    {classes.map(cls => (
+                    {classes.map((cls) => (
                       <li key={cls.id} className="predict-legend-item">
-                        <span className="predict-legend-swatch" style={{ background: cls.color }} />
+                        <span
+                          className="predict-legend-swatch"
+                          style={{ background: cls.color }}
+                        />
                         <span className="predict-legend-name">{cls.name}</span>
                       </li>
                     ))}
@@ -170,12 +211,23 @@ export default function PredictPanel() {
             </>
           )}
 
+          {/* Debug TIFF download — always shown when a job exists */}
+          {job?.status && job.status !== "idle" && activeProject?.id && (
+            <a
+              className="predict-debug-link"
+              href={getDebugTiffUrl(activeProject.id)}
+              download
+            >
+              ⬇ Download raw scene TIFF
+            </a>
+          )}
+
           {/* Error */}
-          {job?.status === 'failed' && (
+          {job?.status === "failed" && (
             <p className="predict-error">{job.error}</p>
           )}
         </div>
       )}
     </div>
-  )
+  );
 }

@@ -50,8 +50,10 @@ def fit_model(
     from sklearn.svm import SVC
 
     cfg = model_config or {}
-    model_type = cfg.get("model_type", "random_forest")
-    hp = cfg.get("hyperparameters", {})
+    # Wizard stores the config as {type, family, params}.
+    # Accept both "model_type"/"hyperparameters" (legacy) and "type"/"params".
+    model_type = cfg.get("model_type") or cfg.get("type", "random_forest")
+    hp = cfg.get("hyperparameters") or cfg.get("params") or {}
 
     if model_type == "random_forest":
         model = RandomForestClassifier(

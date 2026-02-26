@@ -1,39 +1,50 @@
-import { MapContainer, TileLayer, ImageOverlay } from 'react-leaflet'
-import 'leaflet/dist/leaflet.css'
-import './MapView.css'
-import GeomanControl from './GeomanControl'
-import DrawingHandler from './DrawingHandler'
-import TrainingLayer from './TrainingLayer'
-import MapEventHandler from './MapEventHandler'
-import { useAppContext } from '../../context/AppContext'
-import { buildSatTileUrl, MIN_SAT_ZOOM } from '../SatellitePanel/bandCombos'
-import { getPredictImageUrl, getUncertaintyImageUrl } from '../../services/api'
+import { MapContainer, TileLayer, ImageOverlay } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
+import "./MapView.css";
+import GeomanControl from "./GeomanControl";
+import DrawingHandler from "./DrawingHandler";
+import TrainingLayer from "./TrainingLayer";
+import MapEventHandler from "./MapEventHandler";
+import { useAppContext } from "../../context/AppContext";
+import { buildSatTileUrl, MIN_SAT_ZOOM } from "../SatellitePanel/bandCombos";
+import { getPredictImageUrl, getUncertaintyImageUrl } from "../../services/api";
 
 // Default center: roughly central Europe / global overview
-const DEFAULT_CENTER = [48.0, 16.0]
-const DEFAULT_ZOOM = 5
+const DEFAULT_CENTER = [48.0, 16.0];
+const DEFAULT_ZOOM = 5;
 
 export default function MapView() {
   const {
     activeProject,
-    activeScene, activeBandCombo, satelliteOpacity, mapZoom,
-    prediction, predictionOpacity, uncertaintyOpacity,
-  } = useAppContext()
-  const satTileUrl = (activeScene && mapZoom >= MIN_SAT_ZOOM)
-    ? buildSatTileUrl(activeScene, activeBandCombo)
-    : null
+    activeScene,
+    activeBandCombo,
+    satelliteOpacity,
+    mapZoom,
+    prediction,
+    predictionOpacity,
+    uncertaintyOpacity,
+  } = useAppContext();
+  const satTileUrl =
+    activeScene && mapZoom >= MIN_SAT_ZOOM
+      ? buildSatTileUrl(activeScene, activeBandCombo)
+      : null;
 
-  // Leaflet ImageOverlay bounds: [[minlat, minlon], [maxlat, maxlon]]
-  const overlayBounds = prediction?.bbox
-    ? [[prediction.bbox[1], prediction.bbox[0]], [prediction.bbox[3], prediction.bbox[2]]]
-    : null
+  // Use actual raster bounds (from rio_tiler pixel snapping) when available;
+  // fall back to the requested bbox. Format: [[minlat, minlon], [maxlat, maxlon]]
+  const _bb = prediction?.actual_bbox ?? prediction?.bbox;
+  const overlayBounds = _bb
+    ? [
+        [_bb[1], _bb[0]],
+        [_bb[3], _bb[2]],
+      ]
+    : null;
 
   return (
     <div className="map-container">
       <MapContainer
         center={DEFAULT_CENTER}
         zoom={DEFAULT_ZOOM}
-        style={{ height: '100%', width: '100%' }}
+        style={{ height: "100%", width: "100%" }}
         zoomControl={true}
       >
         <TileLayer
@@ -66,7 +77,10 @@ export default function MapView() {
         {overlayBounds && prediction?.timestamp && (
           <ImageOverlay
             key={`unc-${prediction.timestamp}`}
-            url={getUncertaintyImageUrl(activeProject?.id, prediction.timestamp)}
+            url={getUncertaintyImageUrl(
+              activeProject?.id,
+              prediction.timestamp,
+            )}
             bounds={overlayBounds}
             opacity={uncertaintyOpacity}
             zIndex={401}
@@ -78,5 +92,5 @@ export default function MapView() {
         <TrainingLayer />
       </MapContainer>
     </div>
-  )
+  );
 }

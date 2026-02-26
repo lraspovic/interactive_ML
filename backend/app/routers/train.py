@@ -21,7 +21,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import FileResponse
 from geoalchemy2.shape import to_shape
 from pydantic import BaseModel
-from shapely.geometry import mapping
+from shapely.geometry import Point, mapping
 from sqlalchemy import delete, select
 from starlette.background import BackgroundTask
 
@@ -140,7 +140,7 @@ async def download_features_gpkg(
 
     - ``training_polygons``: one row per polygon, polygon geometry,
       label / class_id / n_pixels / mean+std per feature band.
-    - ``pixel_values``: one row per pixel, *polygon geometry repeated*,
+    - ``pixel_values``: one row per pixel, **Point geometry at the pixel centre**,
       label / class_id / sample_id / pixel_idx / all raw feature values.
 
     Open in QGIS: drag the .gpkg onto the map; select a layer in the dialog.
@@ -182,6 +182,11 @@ async def download_features_gpkg(
         geom = to_shape(geom_wkb)
         sid = str(tf.training_sample_id)
 
+        # Deserialise pixel centroids (may be NULL for rows extracted before migration)
+        coords_wgs84: np.ndarray | None = None
+        if tf.pixel_centroids is not None:
+            coords_wgs84 = np.load(io.BytesIO(tf.pixel_centroids))  # (n_pixels, 2)
+
         # ── polygon summary row ──────────────────────────────────────────────
         poly_row: dict = {
             "geometry": geom,
@@ -198,10 +203,17 @@ async def download_features_gpkg(
             poly_row[f"{name}_max"] = round(float(col.max()), 6)
         poly_records.append(poly_row)
 
-        # ── per-pixel rows (polygon geometry repeated) ──────────────────────
+        # ── per-pixel rows with Point geometry ─────────────────────────
         for px_idx in range(X.shape[0]):
+            if coords_wgs84 is not None:
+                lon, lat = coords_wgs84[px_idx]
+                px_geom = Point(lon, lat)
+            else:
+                # Legacy fallback: polygon centroid (no per-pixel coords stored)
+                px_geom = geom.centroid
+
             px_row: dict = {
-                "geometry": geom,
+                "geometry": px_geom,
                 "sample_id": sid,
                 "pixel_idx": px_idx,
                 "label": label,
@@ -359,7 +371,7 @@ async def _run_training(project_id: UUID, item_id: str, collection: str) -> None
                 )
             else:
                 geometry = mapping(to_shape(sample.geometry))
-                X_poly, names = await asyncio.to_thread(
+                X_poly, names, coords = await asyncio.to_thread(
                     extract_pixel_features,
                     geometry,
                     signed_assets,
@@ -378,6 +390,12 @@ async def _run_training(project_id: UUID, item_id: str, collection: str) -> None
                 np.save(buf, X_poly.astype(np.float32))
                 feature_bytes = buf.getvalue()
 
+                centroid_bytes: bytes | None = None
+                if coords is not None:
+                    cbuf = io.BytesIO()
+                    np.save(cbuf, coords.astype(np.float64))
+                    centroid_bytes = cbuf.getvalue()
+
                 async with AsyncSessionLocal() as db:
                     await db.execute(
                         delete(TrainingFeatures).where(
@@ -395,6 +413,7 @@ async def _run_training(project_id: UUID, item_id: str, collection: str) -> None
                         feature_names=names,
                         n_pixels=len(X_poly),
                         feature_data=feature_bytes,
+                        pixel_centroids=centroid_bytes,
                     ))
                     await db.commit()
 

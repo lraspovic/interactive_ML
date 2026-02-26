@@ -1,10 +1,12 @@
 """
 Prediction endpoints.
 
-POST /predict               — kick off a background prediction job
-GET  /predict/status        — poll prediction job status
-GET  /predict/image/{id}    — serve classification PNG
-GET  /predict/uncertainty/{id} — serve uncertainty heatmap PNG
+POST /predict                                  — kick off a background prediction job
+GET  /predict/status                           — poll prediction job status
+GET  /predict/tiles/{z}/{x}/{y}                — serve classification map tiles (colourised on the fly)
+GET  /predict/uncertainty/tiles/{z}/{x}/{y}    — serve uncertainty heatmap tiles
+GET  /predict/download/{project_id}            — download prediction COG (raw class IDs, uint16)
+GET  /predict/uncertainty/download/{project_id}— download uncertainty COG (normalised entropy, float32)
 """
 from __future__ import annotations
 
@@ -15,11 +17,12 @@ import time
 from pathlib import Path
 
 import numpy as np
+from io import BytesIO
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -27,8 +30,8 @@ from app.database import AsyncSessionLocal
 from app.ml.predictor import (
     extract_bbox_features,
     read_raw_bands_tiff,
-    render_prediction_png,
-    render_uncertainty_png,
+    write_prediction_cog,
+    write_uncertainty_cog,
 )
 from app.ml.trainer import MODEL_ARTIFACTS_DIR
 from app.models import Class, Project
@@ -39,6 +42,26 @@ logger = logging.getLogger(__name__)
 
 # In-memory job state — same pattern as _TRAIN_JOBS in train.py.
 _PREDICT_JOBS: dict[str, dict[str, Any]] = {}
+
+# Short-lived class-colour cache so tile endpoints don't hit the DB every request.
+_CLASS_COLOR_CACHE: dict[str, tuple[float, dict[int, str]]] = {}
+_CLASS_COLOR_CACHE_TTL = 300  # seconds
+
+
+async def _get_class_colors(project_id: UUID) -> dict[int, str]:
+    """Return {class_id: "#RRGGBB"} for a project, cached for 5 minutes."""
+    key = str(project_id)
+    cached = _CLASS_COLOR_CACHE.get(key)
+    if cached:
+        ts, colors = cached
+        if time.time() - ts < _CLASS_COLOR_CACHE_TTL:
+            return colors
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Class).where(Class.project_id == project_id))
+        rows = result.scalars().all()
+    colors: dict[int, str] = {c.id: c.color for c in rows}
+    _CLASS_COLOR_CACHE[key] = (time.time(), colors)
+    return colors
 
 
 # ---------------------------------------------------------------------------
@@ -103,22 +126,133 @@ async def predict_status(project_id: UUID = Query(...)):
     return {"project_id": key, **job}
 
 
-@router.get("/image/{project_id}")
-async def prediction_image(project_id: str):
-    """Serve the latest classification PNG for a project."""
-    path = MODEL_ARTIFACTS_DIR / f"pred_{project_id}.png"
+@router.get("/tiles/{z}/{x}/{y}")
+async def prediction_tile(z: int, x: int, y: int, project_id: UUID = Query(...)):
+    """
+    Serve a 256×256 RGBA PNG map tile for the latest prediction.
+    Class IDs are read from the COG and colourised on the fly using the
+    class table so colour changes don't require re-running prediction.
+    """
+    path = MODEL_ARTIFACTS_DIR / f"pred_{project_id}.tif"
     if not path.exists():
         raise HTTPException(status_code=404, detail="No prediction found. Run a prediction first.")
-    return FileResponse(str(path), media_type="image/png")
+
+    class_colors = await _get_class_colors(project_id)
+
+    def _render() -> bytes:
+        from PIL import Image
+        from rio_tiler.io import COGReader
+
+        try:
+            with COGReader(str(path)) as cog:
+                img = cog.tile(x, y, z, resampling_method="nearest")
+        except Exception as exc:
+            if "TileOutsideBounds" in type(exc).__name__ or "outside bounds" in str(exc).lower():
+                buf = BytesIO()
+                Image.fromarray(np.zeros((256, 256, 4), dtype=np.uint8), mode="RGBA").save(buf, format="PNG")
+                return buf.getvalue()
+            raise
+
+        class_arr = img.data[0]   # (256, 256) uint16 class IDs
+        mask = img.mask           # (256, 256) uint8: 255=valid, 0=nodata
+        rgba = np.zeros((256, 256, 4), dtype=np.uint8)
+        for class_id, hex_color in class_colors.items():
+            h = hex_color.lstrip("#")
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            rgba[(class_arr == class_id) & (mask > 0)] = [r, g, b, 210]
+
+        buf = BytesIO()
+        Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+        return buf.getvalue()
+
+    png = await asyncio.to_thread(_render)
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
 
-@router.get("/uncertainty/{project_id}")
-async def uncertainty_image(project_id: str):
-    """Serve the latest uncertainty heatmap PNG for a project."""
-    path = MODEL_ARTIFACTS_DIR / f"uncertainty_{project_id}.png"
+@router.get("/uncertainty/tiles/{z}/{x}/{y}")
+async def uncertainty_tile(z: int, x: int, y: int, project_id: UUID = Query(...)):
+    """
+    Serve a 256×256 RGBA PNG tile for the uncertainty heatmap.
+    Normalised entropy (0–1) is read from the COG and mapped
+    through a blue→yellow→red colour ramp.
+    """
+    path = MODEL_ARTIFACTS_DIR / f"uncertainty_{project_id}.tif"
     if not path.exists():
         raise HTTPException(status_code=404, detail="No uncertainty map found.")
-    return FileResponse(str(path), media_type="image/png")
+
+    def _render() -> bytes:
+        from PIL import Image
+        from rio_tiler.io import COGReader
+
+        try:
+            with COGReader(str(path)) as cog:
+                img = cog.tile(x, y, z, resampling_method="bilinear")
+        except Exception as exc:
+            if "TileOutsideBounds" in type(exc).__name__ or "outside bounds" in str(exc).lower():
+                buf = BytesIO()
+                Image.fromarray(np.zeros((256, 256, 4), dtype=np.uint8), mode="RGBA").save(buf, format="PNG")
+                return buf.getvalue()
+            raise
+
+        ent = img.data[0].astype(np.float32)  # (256, 256) normalised entropy 0–1
+        mask = img.mask                        # (256, 256) uint8
+
+        low  = np.array([30,  130, 220], dtype=np.float32)  # blue
+        mid  = np.array([250, 220,  30], dtype=np.float32)  # yellow
+        high = np.array([220,  30,  30], dtype=np.float32)  # red
+
+        t = ent.ravel()[:, None]
+        colors = np.where(
+            t <= 0.5,
+            low + (mid - low) * (t / 0.5),
+            mid + (high - mid) * ((t - 0.5) / 0.5),
+        ).astype(np.uint8).reshape(256, 256, 3)
+
+        rgba = np.zeros((256, 256, 4), dtype=np.uint8)
+        rgba[:, :, :3] = colors
+        rgba[:, :, 3] = np.where(mask.reshape(256, 256) > 0, 200, 0).astype(np.uint8)
+
+        buf = BytesIO()
+        Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+        return buf.getvalue()
+
+    png = await asyncio.to_thread(_render)
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-cache"})
+
+
+@router.get("/download/{project_id}")
+async def download_prediction(project_id: str):
+    """
+    Download the prediction COG (uint16 class IDs, EPSG:3857, deflate-compressed).
+    Open in QGIS, GDAL, or any GIS tool.  Apply the project class→colour table
+    to render the classes.
+    """
+    path = MODEL_ARTIFACTS_DIR / f"pred_{project_id}.tif"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No prediction found. Run a prediction first.")
+    short = project_id[:8]
+    return FileResponse(
+        str(path),
+        media_type="image/tiff",
+        headers={"Content-Disposition": f'attachment; filename="prediction_{short}.tif"'},
+    )
+
+
+@router.get("/uncertainty/download/{project_id}")
+async def download_uncertainty(project_id: str):
+    """
+    Download the uncertainty COG (float32 normalised entropy 0–1, EPSG:3857).
+    Values near 1 indicate high uncertainty; values near 0 indicate high confidence.
+    """
+    path = MODEL_ARTIFACTS_DIR / f"uncertainty_{project_id}.tif"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No uncertainty map found.")
+    short = project_id[:8]
+    return FileResponse(
+        str(path),
+        media_type="image/tiff",
+        headers={"Content-Disposition": f'attachment; filename="uncertainty_{short}.tif"'},
+    )
 
 
 @router.get("/debug-tiff/{project_id}")
@@ -218,14 +352,16 @@ async def _run_prediction(
         _PREDICT_JOBS[key]["progress"] = 0.25
 
         # ── 4. Extract bbox features ──────────────────────────────────────────
-        X, H, W, valid_mask, feature_names, actual_bbox = await asyncio.to_thread(
-            extract_bbox_features,
-            bbox,
-            signed_assets,
-            available_bands,
-            enabled_indices,
+        X, H, W, valid_mask, feature_names, actual_bbox, utm_transform, native_crs = (
+            await asyncio.to_thread(
+                extract_bbox_features,
+                bbox,
+                signed_assets,
+                available_bands,
+                enabled_indices,
+            )
         )
-        # Fall back to the requested bbox if rio_tiler didn't report actual bounds
+        # Fall back to the requested bbox if feature extraction had no data
         actual_bbox = actual_bbox or bbox
 
         if X is None or H == 0 or W == 0:
@@ -262,21 +398,18 @@ async def _run_prediction(
 
         _PREDICT_JOBS[key]["progress"] = 0.85
 
-        # ── 6. Load class colors ──────────────────────────────────────────────
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(Class).where(Class.project_id == project_id)
-            )
-            class_rows = result.scalars().all()
-        class_colors: dict[int, str] = {c.id: c.color for c in class_rows}
-
-        # ── 7. Render and save PNGs ───────────────────────────────────────────
-        pred_png = render_prediction_png(predictions, class_colors, H, W, valid_mask)
-        unc_png  = render_uncertainty_png(probas, H, W, valid_mask)
-
+        # ── 6. Write prediction and uncertainty COGs ─────────────────────────────
         MODEL_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-        (MODEL_ARTIFACTS_DIR / f"pred_{project_id}.png").write_bytes(pred_png)
-        (MODEL_ARTIFACTS_DIR / f"uncertainty_{project_id}.png").write_bytes(unc_png)
+        await asyncio.to_thread(
+            write_prediction_cog,
+            predictions, H, W, valid_mask, utm_transform, native_crs,
+            MODEL_ARTIFACTS_DIR / f"pred_{project_id}.tif",
+        )
+        await asyncio.to_thread(
+            write_uncertainty_cog,
+            probas, H, W, valid_mask, utm_transform, native_crs,
+            MODEL_ARTIFACTS_DIR / f"uncertainty_{project_id}.tif",
+        )
 
         _PREDICT_JOBS[key] = {
             "status":      "done",
@@ -290,8 +423,8 @@ async def _run_prediction(
             "image_size":  [W, H],
         }
         logger.info(
-            "Prediction complete for project %s — %d×%d px, %d classes",
-            project_id, W, H, len(class_colors),
+            "Prediction complete for project %s — %d×%d px",
+            project_id, W, H,
         )
 
     except Exception as exc:

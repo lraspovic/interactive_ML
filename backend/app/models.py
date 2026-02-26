@@ -28,7 +28,12 @@ class Project(Base):
     imagery_url = Column(Text, nullable=True)
     available_bands = Column(JSONB, nullable=True)   # list[str]
     enabled_indices = Column(JSONB, nullable=True)   # list[str]
-    resolution_m = Column(Integer, nullable=False, server_default="10")
+    # resolution_m kept nullable for backward compat; never read by ML pipeline.
+    resolution_m = Column(Integer, nullable=True, server_default="10")
+    # Multi-sensor config: list[{sensor_type, bands}]
+    sensors = Column(JSONB, nullable=True)
+    # GLCM texture feature config: {enabled, bands, window_size, statistics}
+    glcm_config = Column(JSONB, nullable=True)
     model_config = Column(JSONB, nullable=True)
     created_at = Column(
         DateTime(timezone=True),

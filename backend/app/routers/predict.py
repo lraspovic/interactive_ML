@@ -29,6 +29,7 @@ from sqlalchemy import select
 from app.database import AsyncSessionLocal
 from app.ml.predictor import (
     extract_bbox_features,
+    MAX_SIZE,
     read_raw_bands_tiff,
     write_prediction_cog,
     write_uncertainty_cog,
@@ -68,11 +69,27 @@ async def _get_class_colors(project_id: UUID) -> dict[int, str]:
 # Schemas
 # ---------------------------------------------------------------------------
 
+class SceneRef(BaseModel):
+    """Reference to one STAC scene used for feature extraction."""
+    collection: str
+    item_id: str
+
+
 class PredictRequest(BaseModel):
     project_id: UUID
-    item_id: str
-    collection: str = "sentinel-2-l2a"
     bbox: list[float]   # [minlon, minlat, maxlon, maxlat]
+    # New multi-sensor API: pass a list of scenes.
+    # Legacy API: pass item_id + collection (converted to scenes automatically).
+    scenes: list[SceneRef] = []
+    item_id: str | None = None          # legacy
+    collection: str = "sentinel-2-l2a"  # legacy
+
+    def effective_scenes(self) -> list[SceneRef]:
+        if self.scenes:
+            return self.scenes
+        if self.item_id:
+            return [SceneRef(collection=self.collection, item_id=self.item_id)]
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +104,13 @@ async def trigger_predict(body: PredictRequest, background_tasks: BackgroundTask
     The bbox is the map viewport at the time the user clicks "Run Prediction".
     Prediction and uncertainty PNGs are saved to disk and overwritten each run.
     """
+    scenes = body.effective_scenes()
+    if not scenes:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide at least one scene via 'scenes' or 'item_id'.",
+        )
+
     key = str(body.project_id)
     if _PREDICT_JOBS.get(key, {}).get("status") == "running":
         raise HTTPException(status_code=409, detail="Prediction already in progress")
@@ -96,16 +120,16 @@ async def trigger_predict(body: PredictRequest, background_tasks: BackgroundTask
         "progress":    0.0,
         "bbox":        body.bbox,
         "actual_bbox": None,
-        "item_id":     body.item_id,
-        "collection":  body.collection,
+        # Store scenes for status reporting (first scene for legacy compat)
+        "item_id":     scenes[0].item_id,
+        "collection":  scenes[0].collection,
         "timestamp":   None,
         "error":       None,
     }
     background_tasks.add_task(
         _run_prediction,
         body.project_id,
-        body.item_id,
-        body.collection,
+        scenes,
         body.bbox,
     )
     return {"status": "queued", "project_id": key}
@@ -296,7 +320,7 @@ async def prediction_debug_tiff(project_id: str):
 
     signed_assets = await asyncio.to_thread(_get_signed_assets, collection, item_id)
     tiff_bytes = await asyncio.to_thread(
-        read_raw_bands_tiff, bbox, signed_assets, available_bands, enabled_indices
+        read_raw_bands_tiff, bbox, {collection: signed_assets}, available_bands, enabled_indices
     )
 
     if not tiff_bytes:
@@ -320,11 +344,11 @@ async def prediction_debug_tiff(project_id: str):
 
 async def _run_prediction(
     project_id: UUID,
-    item_id: str,
-    collection: str,
+    scenes: list[SceneRef],
     bbox: list[float],
 ) -> None:
     key = str(project_id)
+    first_scene = scenes[0]
     try:
         # ── 1. Load project config ────────────────────────────────────────────
         async with AsyncSessionLocal() as db:
@@ -333,7 +357,7 @@ async def _run_prediction(
                 raise ValueError(f"Project {project_id} not found")
             available_bands: list[str] = project.available_bands or ["blue", "green", "red"]
             enabled_indices: list[str] = project.enabled_indices or []
-
+            glcm_config: dict | None = project.glcm_config
         # ── 2. Load trained model ─────────────────────────────────────────────
         latest_path = MODEL_ARTIFACTS_DIR / f"model_{project_id}_latest.pkl"
         if not latest_path.exists():
@@ -346,19 +370,25 @@ async def _run_prediction(
 
         _PREDICT_JOBS[key]["progress"] = 0.15
 
-        # ── 3. Fetch signed asset hrefs (cached) ──────────────────────────────
-        signed_assets = await asyncio.to_thread(_get_signed_assets, collection, item_id)
+        # ── 3. Fetch signed asset hrefs per collection (cached) ──────────────
+        sensors_assets: dict[str, dict] = {}
+        for scene in scenes:
+            sensors_assets[scene.collection] = await asyncio.to_thread(
+                _get_signed_assets, scene.collection, scene.item_id
+            )
 
         _PREDICT_JOBS[key]["progress"] = 0.25
 
-        # ── 4. Extract bbox features ──────────────────────────────────────────
+        # ── 4. Extract bbox features ─────────────────────────────────────────
         X, H, W, valid_mask, feature_names, actual_bbox, utm_transform, native_crs = (
             await asyncio.to_thread(
                 extract_bbox_features,
                 bbox,
-                signed_assets,
+                sensors_assets,
                 available_bands,
                 enabled_indices,
+                MAX_SIZE,
+                glcm_config,
             )
         )
         # Fall back to the requested bbox if feature extraction had no data
@@ -416,8 +446,8 @@ async def _run_prediction(
             "progress":    1.0,
             "bbox":        bbox,
             "actual_bbox": actual_bbox,
-            "item_id":     item_id,
-            "collection":  collection,
+            "item_id":     first_scene.item_id,
+            "collection":  first_scene.collection,
             "timestamp":   int(time.time()),
             "error":       None,
             "image_size":  [W, H],
@@ -434,8 +464,8 @@ async def _run_prediction(
             "progress":    0.0,
             "bbox":        bbox,
             "actual_bbox": None,
-            "item_id":     item_id,
-            "collection":  collection,
+            "item_id":     first_scene.item_id,
+            "collection":  first_scene.collection,
             "timestamp":   None,
             "error":       str(exc),
         }

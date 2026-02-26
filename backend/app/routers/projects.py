@@ -35,6 +35,8 @@ def _project_to_read(project: Project) -> ProjectRead:
         available_bands=project.available_bands or [],
         enabled_indices=project.enabled_indices or [],
         resolution_m=project.resolution_m,
+        sensors=project.sensors,
+        glcm_config=project.glcm_config,
         model_config=project.model_config,
         classes=[
             {
@@ -65,6 +67,28 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
                 detail=f"Invalid AOI geometry: {exc}",
             )
 
+    # Derive available_bands from the union of sensor bands so both legacy
+    # callers (which set available_bands directly) and new wizard submissions
+    # (which set sensors) are handled correctly.
+    sensors_payload = [
+        s.model_dump() for s in (body.sensors or [])
+    ]
+    if sensors_payload:
+        # Build the union of all sensor bands, preserving order and deduplicating
+        seen: set[str] = set()
+        derived_bands: list[str] = []
+        for sc in body.sensors:
+            for b in sc.bands:
+                if b not in seen:
+                    seen.add(b)
+                    derived_bands.append(b)
+        # Prefer the derived list; fall back to the explicit list only if
+        # the derived list is empty (shouldn't happen in practice).
+        effective_bands = derived_bands or body.available_bands
+    else:
+        effective_bands = body.available_bands
+        sensors_payload = None
+
     project = Project(
         id=uuid.uuid4(),
         name=body.name,
@@ -72,9 +96,11 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
         task_type=body.task_type,
         aoi_geometry=aoi_geom,
         imagery_url=body.imagery_url,
-        available_bands=body.available_bands,
+        available_bands=effective_bands,
         enabled_indices=body.enabled_indices,
         resolution_m=body.resolution_m,
+        sensors=sensors_payload,
+        glcm_config=body.glcm_config,
         model_config=body.model_config_,
     )
     db.add(project)

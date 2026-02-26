@@ -4,6 +4,7 @@ Satellite imagery endpoints.
 - GET /imagery/stac-search              — query Planetary Computer STAC, return scene list
 - GET /imagery/stac-item/{coll}/{id}    — fetch + sign one STAC item (JSON proxy)
 - GET /imagery/stac/tiles/{z}/{x}/{y}  — serve map tiles directly from COG assets
+- GET /imagery/spectral-indices         — return the full ASI catalogue grouped by domain
 """
 from __future__ import annotations
 
@@ -23,6 +24,9 @@ from fastapi.responses import JSONResponse, Response
 router = APIRouter(prefix="/imagery", tags=["imagery"])
 
 PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
+
+# Collections that do NOT carry eo:cloud_cover metadata (SAR / radar).
+NO_CLOUD_FILTER_COLLECTIONS = {"sentinel-1-rtc"}
 
 # Optional PC subscription key (not required for Sentinel-2 L2A, but widens
 # rate limits on other collections).
@@ -122,14 +126,17 @@ async def stac_search(
 
     try:
         catalog = _pc_client()
-        search = catalog.search(
+        search_kwargs: dict = dict(
             collections=[collection],
             bbox=bbox_list,
             datetime=datetime_range,
-            query={"eo:cloud_cover": {"lt": max_cloud}},
             limit=limit,
             sortby=["-properties.datetime"],
         )
+        # Sentinel-1 RTC has no eo:cloud_cover property; skip the filter.
+        if collection not in NO_CLOUD_FILTER_COLLECTIONS:
+            search_kwargs["query"] = {"eo:cloud_cover": {"lt": max_cloud}}
+        search = catalog.search(**search_kwargs)
         items = list(search.items())
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"STAC search failed: {exc}")
@@ -162,6 +169,39 @@ async def stac_search(
         )
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Spectral index catalogue
+# ---------------------------------------------------------------------------
+
+@router.get("/spectral-indices")
+async def spectral_indices():
+    """
+    Return the full ASI spectral index catalogue grouped by domain.
+
+    Each entry includes the index short-name (id), long name, and the list
+    of internal band names required to compute it.  The frontend uses this
+    response to populate the feature-selection UI and to gate index checkboxes
+    based on the bands available in the current project.
+
+    Example response fragment::
+
+        {
+          "vegetation": [
+            {"id": "NDVI", "long_name": "Normalized Difference Vegetation Index",
+             "bands": ["nir", "red"]},
+            ...
+          ],
+          "radar": [
+            {"id": "RVI", "long_name": "Radar Vegetation Index",
+             "bands": ["sar_vv", "sar_vh"]},
+            ...
+          ]
+        }
+    """
+    from app.ml.spectral_catalogue import get_all_indices_by_domain
+    return get_all_indices_by_domain()
 
 
 # ---------------------------------------------------------------------------

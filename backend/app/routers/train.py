@@ -7,7 +7,9 @@ GET  /train/status   — poll progress / metrics
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import json
 import logging
 import os
 import shutil
@@ -34,6 +36,30 @@ from app.routers.imagery import _get_signed_assets
 router = APIRouter(prefix="/train", tags=["train"])
 logger = logging.getLogger(__name__)
 
+
+def _feature_fingerprint(
+    available_bands: list[str],
+    enabled_indices: list[str],
+    glcm_config: dict | None,
+) -> str:
+    """
+    Return an 8-character hex digest that uniquely identifies the feature
+    extraction schema (bands + indices + GLCM config).  Baked into the
+    cache_item_id so that any change to the feature config automatically
+    invalidates stale cache entries without a schema migration.
+    """
+    payload = json.dumps(
+        {
+            "bands": sorted(available_bands),
+            "indices": sorted(enabled_indices),
+            "glcm": glcm_config,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha1(payload.encode()).hexdigest()[:8]
+
+
 # In-memory job status keyed by str(project_id).
 # For a multi-process deployment this would need an external store,
 # but for a single-worker setup this is fine.
@@ -44,10 +70,27 @@ _TRAIN_JOBS: dict[str, dict[str, Any]] = {}
 # Schemas
 # ---------------------------------------------------------------------------
 
+class SceneRef(BaseModel):
+    """Reference to one STAC scene used for feature extraction."""
+    collection: str
+    item_id: str
+
+
 class TrainRequest(BaseModel):
     project_id: UUID
-    item_id: str
-    collection: str = "sentinel-2-l2a"
+    # New multi-sensor API: pass a list of scenes.
+    # Legacy API: pass item_id + collection (converted to scenes automatically).
+    scenes: list[SceneRef] = []
+    item_id: str | None = None          # legacy
+    collection: str = "sentinel-2-l2a"  # legacy
+
+    def effective_scenes(self) -> list[SceneRef]:
+        """Resolve to a non-empty list of SceneRef regardless of which fields are set."""
+        if self.scenes:
+            return self.scenes
+        if self.item_id:
+            return [SceneRef(collection=self.collection, item_id=self.item_id)]
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +101,17 @@ class TrainRequest(BaseModel):
 async def trigger_train(body: TrainRequest, background_tasks: BackgroundTasks):
     """
     Start model retraining for *project_id* using pixel values extracted from
-    the STAC scene identified by *item_id* / *collection*.
+    the STAC scene(s) identified by *scenes* (or legacy *item_id* / *collection*).
 
     Returns immediately; poll GET /train/status?project_id=... for progress.
     """
+    scenes = body.effective_scenes()
+    if not scenes:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide at least one scene via 'scenes' or 'item_id'.",
+        )
+
     key = str(body.project_id)
     if _TRAIN_JOBS.get(key, {}).get("status") == "running":
         raise HTTPException(status_code=409, detail="Training already in progress for this project")
@@ -73,7 +123,7 @@ async def trigger_train(body: TrainRequest, background_tasks: BackgroundTasks):
         "error": None,
     }
     background_tasks.add_task(
-        _run_training, body.project_id, body.item_id, body.collection
+        _run_training, body.project_id, scenes
     )
     return {"status": "queued", "project_id": key}
 
@@ -100,13 +150,28 @@ async def feature_means(
     Only polygons that have already been extracted (cached in training_features)
     are returned — call POST /train first to populate the cache.
     """
+    # Reconstruct the same composite cache key used at training time, including
+    # the feature-schema fingerprint so stale entries are not returned.
+    async with AsyncSessionLocal() as db:
+        project = await db.get(Project, project_id)
+
+    if project is None:
+        return {"item_id": item_id, "collection": collection, "features": []}
+
+    fp = _feature_fingerprint(
+        project.available_bands or ["blue", "green", "red"],
+        project.enabled_indices or [],
+        project.glcm_config,
+    )
+    cache_item_id = f"{collection}:{item_id}:{fp}"
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(TrainingFeatures, TrainingSample.label, TrainingSample.class_id)
             .join(TrainingSample, TrainingFeatures.training_sample_id == TrainingSample.id)
             .where(
                 TrainingFeatures.project_id == project_id,
-                TrainingFeatures.item_id == item_id,
+                TrainingFeatures.item_id == cache_item_id,
                 TrainingFeatures.collection == collection,
             )
             .order_by(TrainingSample.label, TrainingFeatures.created_at)
@@ -149,6 +214,21 @@ async def download_features_gpkg(
     import geopandas as gpd
     import pandas as pd
 
+    # Reconstruct the same composite cache key used at training time, including
+    # the feature-schema fingerprint so stale entries are not returned.
+    async with AsyncSessionLocal() as db:
+        project = await db.get(Project, project_id)
+
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    fp = _feature_fingerprint(
+        project.available_bands or ["blue", "green", "red"],
+        project.enabled_indices or [],
+        project.glcm_config,
+    )
+    cache_item_id = f"{collection}:{item_id}:{fp}"
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(
@@ -160,7 +240,7 @@ async def download_features_gpkg(
             .join(TrainingSample, TrainingFeatures.training_sample_id == TrainingSample.id)
             .where(
                 TrainingFeatures.project_id == project_id,
-                TrainingFeatures.item_id == item_id,
+                TrainingFeatures.item_id == cache_item_id,
                 TrainingFeatures.collection == collection,
             )
             .order_by(TrainingSample.label, TrainingFeatures.created_at)
@@ -315,8 +395,13 @@ def _polygon_split(
 # Background task
 # ---------------------------------------------------------------------------
 
-async def _run_training(project_id: UUID, item_id: str, collection: str) -> None:
+async def _run_training(project_id: UUID, scenes: list["SceneRef"]) -> None:
+    """Background task: extract features for each polygon, train the model."""
     key = str(project_id)
+    # Use a composite cache key so features from different scene combinations
+    # are not mixed.  Sorted for determinism.
+    scene_key = "|".join(f"{s.collection}:{s.item_id}" for s in sorted(scenes, key=lambda s: s.item_id))
+    cache_collection = "multi" if len(scenes) > 1 else scenes[0].collection
     try:
         # ── 1. Load project config and training samples from DB ──────────────
         async with AsyncSessionLocal() as db:
@@ -327,17 +412,26 @@ async def _run_training(project_id: UUID, item_id: str, collection: str) -> None
             available_bands: list[str] = project.available_bands or ["blue", "green", "red"]
             enabled_indices: list[str] = project.enabled_indices or []
             model_config: dict = project.model_config or {}
+            glcm_config: dict | None = project.glcm_config
 
-            result = await db.execute(
-                select(TrainingSample).where(TrainingSample.project_id == project_id)
-            )
-            samples = result.scalars().all()
+        # Include a feature-schema fingerprint in the cache key so that any
+        # change to bands / indices / GLCM config automatically invalidates
+        # stale cache entries without a DB migration.
+        fp = _feature_fingerprint(available_bands, enabled_indices, glcm_config)
+        cache_item_id = f"{scene_key}:{fp}"[:255]
+
+        result = await db.execute(
+            select(TrainingSample).where(TrainingSample.project_id == project_id)
+        )
+        samples = result.scalars().all()
 
         if not samples:
             raise ValueError("No training samples found — draw some polygons first")
 
-        # ── 2. Fetch signed asset hrefs (cached) ─────────────────────────────
-        signed_assets = _get_signed_assets(collection, item_id)
+        # ── 2. Fetch signed asset hrefs per collection (cached) ──────────────
+        sensors_assets: dict[str, dict] = {}
+        for scene in scenes:
+            sensors_assets[scene.collection] = _get_signed_assets(scene.collection, scene.item_id)
 
         # ── 3. Extract & persist features per polygon ────────────────────────
         # poly_data entries: (X_poly, class_id, area_deg2)
@@ -356,8 +450,8 @@ async def _run_training(project_id: UUID, item_id: str, collection: str) -> None
                 cached = await db.execute(
                     select(TrainingFeatures).where(
                         TrainingFeatures.training_sample_id == sample_id,
-                        TrainingFeatures.item_id == item_id,
-                        TrainingFeatures.collection == collection,
+                        TrainingFeatures.item_id == cache_item_id,
+                        TrainingFeatures.collection == cache_collection,
                     )
                 )
                 cached_row = cached.scalar_one_or_none()
@@ -374,9 +468,10 @@ async def _run_training(project_id: UUID, item_id: str, collection: str) -> None
                 X_poly, names, coords = await asyncio.to_thread(
                     extract_pixel_features,
                     geometry,
-                    signed_assets,
+                    sensors_assets,
                     available_bands,
                     enabled_indices,
+                    glcm_config,
                 )
                 if X_poly is None or len(X_poly) == 0:
                     logger.warning("No valid pixels for sample %s — skipping", sample_id)
@@ -400,16 +495,16 @@ async def _run_training(project_id: UUID, item_id: str, collection: str) -> None
                     await db.execute(
                         delete(TrainingFeatures).where(
                             TrainingFeatures.training_sample_id == sample_id,
-                            TrainingFeatures.item_id == item_id,
-                            TrainingFeatures.collection == collection,
+                            TrainingFeatures.item_id == cache_item_id,
+                            TrainingFeatures.collection == cache_collection,
                         )
                     )
                     db.add(TrainingFeatures(
                         id=uuid.uuid4(),
                         training_sample_id=sample_id,
                         project_id=project_id,
-                        item_id=item_id,
-                        collection=collection,
+                        item_id=cache_item_id,
+                        collection=cache_collection,
                         feature_names=names,
                         n_pixels=len(X_poly),
                         feature_data=feature_bytes,
@@ -418,7 +513,7 @@ async def _run_training(project_id: UUID, item_id: str, collection: str) -> None
                     await db.commit()
 
                 logger.info(
-                    "Saved %d pixels for sample %s (scene %s)", len(X_poly), sample_id, item_id
+                    "Saved %d pixels for sample %s (scenes %s)", len(X_poly), sample_id, scene_key
                 )
 
             poly_data.append((X_poly, label, area_deg2))

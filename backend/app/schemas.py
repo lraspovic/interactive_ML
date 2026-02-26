@@ -31,6 +31,24 @@ class ClassRead(BaseModel):
 # Projects
 # ---------------------------------------------------------------------------
 
+class SensorConfig(BaseModel):
+    """
+    One sensor's contribution to a project: which collection to query and
+    which logical band names to extract from it.
+
+    ``sensor_type`` must be one of the keys in
+    ``spectral_catalogue.COLLECTION_BAND_TO_ASSET``.
+    """
+    sensor_type: str = Field(
+        ...,
+        description='STAC collection id, e.g. "sentinel-2-l2a" or "sentinel-1-rtc"',
+    )
+    bands: list[str] = Field(
+        ...,
+        description="Logical band names to use from this sensor",
+    )
+
+
 class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
@@ -39,9 +57,25 @@ class ProjectCreate(BaseModel):
         None, description="GeoJSON Polygon for the area of interest"
     )
     imagery_url: str | None = None
+    # Legacy flat band list — kept for backward compatibility.  When *sensors* is
+    # provided the router should derive available_bands from the union of sensor
+    # band lists.  At least one of these two fields must yield a non-empty band list.
     available_bands: list[str] = ["blue", "green", "red"]
     enabled_indices: list[str] = []
-    resolution_m: int = 10
+    # resolution_m kept as optional for backward compat; never read by ML pipeline.
+    resolution_m: int | None = None
+    # New multi-sensor field.  Default to single S-2 RGB sensor to match the
+    # old wizard defaults.
+    sensors: list[SensorConfig] = Field(
+        default_factory=lambda: [
+            SensorConfig(sensor_type="sentinel-2-l2a", bands=["blue", "green", "red"])
+        ],
+        description="Sensors and their selected bands for this project",
+    )
+    glcm_config: dict[str, Any] | None = Field(
+        None,
+        description="GLCM texture feature config, e.g. {enabled, bands, window_size, statistics}",
+    )
     model_config_: dict[str, Any] | None = Field(None, alias="model_config")
     classes: list[ClassCreate] = Field(..., min_length=2)
 
@@ -55,7 +89,9 @@ class ProjectRead(BaseModel):
     imagery_url: str | None
     available_bands: list[str]
     enabled_indices: list[str]
-    resolution_m: int
+    resolution_m: int | None
+    sensors: list[SensorConfig] | None
+    glcm_config: dict[str, Any] | None
     model_config: dict[str, Any] | None
     classes: list[ClassRead]
     created_at: datetime

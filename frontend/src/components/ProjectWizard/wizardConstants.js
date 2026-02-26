@@ -1,23 +1,48 @@
-export const BAND_OPTIONS = [
-  { id: 'blue',     label: 'Blue' },
-  { id: 'green',    label: 'Green' },
-  { id: 'red',      label: 'Red' },
-  { id: 'nir',      label: 'NIR' },
-  { id: 'red_edge', label: 'Red Edge' },
-  { id: 'swir1',    label: 'SWIR-1' },
-  { id: 'swir2',    label: 'SWIR-2' },
-  { id: 'sar_vv',   label: 'SAR VV' },
-  { id: 'sar_vh',   label: 'SAR VH' },
+// ─── Sensor options ──────────────────────────────────────────────────────────
+export const SENSOR_OPTIONS = [
+  { id: 'sentinel-2-l2a', label: 'Sentinel-2 L2A' },
+  { id: 'sentinel-1-rtc', label: 'Sentinel-1 RTC' },
 ]
 
-export const SPECTRAL_INDICES = [
-  { id: 'ndvi', label: 'NDVI',  description: 'Vegetation',    required: ['nir', 'red'] },
-  { id: 'ndwi', label: 'NDWI',  description: 'Water',         required: ['green', 'nir'] },
-  { id: 'ndbi', label: 'NDBI',  description: 'Built-up',      required: ['swir1', 'nir'] },
-  { id: 'bsi',  label: 'BSI',   description: 'Bare Soil',     required: ['swir1', 'red', 'nir', 'blue'] },
-  { id: 'evi',  label: 'EVI',   description: 'Enhanced Veg.', required: ['nir', 'red', 'blue'] },
+// Logical band names available per collection.
+// These match COLLECTION_BAND_TO_ASSET keys in the backend spectral_catalogue.
+export const SENSOR_BANDS = {
+  'sentinel-2-l2a': [
+    { id: 'blue',       label: 'Blue (B02)' },
+    { id: 'green',      label: 'Green (B03)' },
+    { id: 'red',        label: 'Red (B04)' },
+    { id: 'red_edge_1', label: 'Red Edge 1 (B05)' },
+    { id: 'red_edge_2', label: 'Red Edge 2 (B06)' },
+    { id: 'red_edge_3', label: 'Red Edge 3 (B07)' },
+    { id: 'nir',        label: 'NIR (B08)' },
+    { id: 'nir_2',      label: 'NIR narrow (B8A)' },
+    { id: 'swir1',      label: 'SWIR-1 (B11)' },
+    { id: 'swir2',      label: 'SWIR-2 (B12)' },
+  ],
+  'sentinel-1-rtc': [
+    { id: 'sar_vv', label: 'SAR VV' },
+    { id: 'sar_vh', label: 'SAR VH' },
+  ],
+}
+
+// Default RGB-only sensor config (matches wizard default)
+export const DEFAULT_SENSORS = [
+  { sensor_type: 'sentinel-2-l2a', bands: ['blue', 'green', 'red'] },
 ]
 
+// GLCM texture statistics available for selection
+export const GLCM_STATISTICS = [
+  'contrast',
+  'dissimilarity',
+  'homogeneity',
+  'energy',
+  'correlation',
+  'ASM',
+]
+
+export const GLCM_WINDOW_SIZES = [3, 5, 7, 9]
+
+// ─── Model config ────────────────────────────────────────────────────────────
 export const MODEL_FAMILIES = {
   classical: [
     { id: 'random_forest',      label: 'Random Forest' },

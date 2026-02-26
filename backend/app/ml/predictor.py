@@ -28,7 +28,13 @@ from pathlib import Path
 
 import numpy as np
 
-from app.ml.features import S2_BAND_TO_ASSET, SPECTRAL_INDICES
+from app.ml.spectral_catalogue import (
+    COLLECTION_BAND_TO_ASSET,
+    LEGACY_BAND_ALIASES,
+    compute_index,
+    SPECTRAL_INDEX_CATALOGUE,
+)
+from app.ml.features import compute_glcm_features, GLCM_MAX_PIXELS
 
 logger = logging.getLogger(__name__)
 
@@ -118,43 +124,49 @@ def _read_band_part(
 
 def extract_bbox_features(
     bbox: list[float],
-    signed_assets: dict,
+    sensors_assets: dict,
     available_bands: list[str],
     enabled_indices: list[str],
     max_size: int = MAX_SIZE,
+    glcm_config: dict | None = None,
 ) -> tuple:
     """
     Extract a (H*W, n_features) feature matrix for a rectangular bounding box.
 
-    Bands are read at native pixel resolution (nearest-neighbour resampling) so
-    pixel values fed to the classifier are identical to the source scene values.
-    Mixed-resolution bands (e.g. 10 m + 20 m S2) are aligned to the shared
-    pixel grid by snapping to the minimum common dimensions.
-    An optional *max_size* cap limits the pixel dimensions for prediction
-    performance (nearest-neighbour is used even when downsampling).
-
-    All bands are read in native UTM (no CRS change).  The shared utm_transform
-    + native_crs are returned so the caller can write COGs with an exact affine.
+    Parameters
+    ----------
+    bbox : [minlon, minlat, maxlon, maxlat] in EPSG:4326.
+    sensors_assets:
+        Either the new format ``{collection_id: signed_asset_dict}`` or the
+        legacy flat format ``{asset_key: asset_info}`` (treated as S-2 L2A).
+    available_bands : ordered list of logical band names from the project config.
+    enabled_indices : spectral index short names to compute.
+    max_size : optional pixel-dimension cap for prediction performance.
 
     Returns
     -------
-    X                 : (H*W, n_features) float32, or None on failure
-    H, W              : pixel dimensions of the raster window
-    valid_mask        : (H*W,) bool — True where all bands had valid data
-    feature_names     : list[str]
-    actual_bounds_wgs84 : [west, south, east, north] EPSG:4326 (for status reporting)
-    utm_transform     : rasterio Affine for the (H, W) grid in native UTM
-    native_crs        : rasterio.crs.CRS of the source scene
+    X, H, W, valid_mask, feature_names, actual_bounds_wgs84, utm_transform,
+    native_crs
     """
-    # Resolve band names → signed asset hrefs
+    # Backward-compat: wrap legacy flat dict
+    known_collections = set(COLLECTION_BAND_TO_ASSET.keys())
+    if not any(k in known_collections for k in sensors_assets):
+        sensors_assets = {"sentinel-2-l2a": sensors_assets}
+
+    # Resolve band names → signed hrefs across all collections
     band_hrefs: dict[str, str] = {}
-    for logical in available_bands:
-        asset_key = S2_BAND_TO_ASSET.get(logical)
-        if not asset_key:
-            continue
-        asset_info = signed_assets.get(asset_key)
-        if asset_info and asset_info.get("href"):
-            band_hrefs[logical] = asset_info["href"]
+    for collection, signed_assets in sensors_assets.items():
+        band_map = COLLECTION_BAND_TO_ASSET.get(collection, {})
+        for logical in available_bands:
+            if logical in band_hrefs:
+                continue
+            resolved = LEGACY_BAND_ALIASES.get(logical, logical)
+            asset_key = band_map.get(resolved) or band_map.get(logical)
+            if not asset_key:
+                continue
+            asset_info = signed_assets.get(asset_key)
+            if asset_info and asset_info.get("href"):
+                band_hrefs[logical] = asset_info["href"]
 
     if not band_hrefs:
         logger.warning("No matching assets found for bands %s", available_bands)
@@ -163,8 +175,8 @@ def extract_bbox_features(
     # Read all bands in parallel
     band_arrays: dict[str, np.ndarray] = {}
     band_masks: dict[str, np.ndarray] = {}
-    shapes: list[tuple[int, int]] = []
-    actual_native_utm: tuple | None = None  # (left, bottom, right, top) in native UTM
+    band_bounds: dict[str, tuple] = {}          # per-band native (l,b,r,t) in UTM
+    actual_native_utm: tuple | None = None
     native_crs = None
 
     with ThreadPoolExecutor(max_workers=len(band_hrefs)) as pool:
@@ -177,25 +189,38 @@ def extract_bbox_features(
             if arr is not None:
                 band_arrays[band_name] = arr
                 band_masks[band_name] = mask
-                shapes.append(arr.shape)
-                if actual_native_utm is None:
-                    actual_native_utm = a_native
+                band_bounds[band_name] = a_native
+                if native_crs is None:
                     native_crs = crs
 
     if not band_arrays:
         return None, 0, 0, None, [], None, None, None
 
-    # Snap all bands to the common (minimum) pixel dimensions.
-    # Since all bands cover the same actual_native_utm extent, the snapped
-    # array corresponds to a coarser GSD but the same spatial footprint —
-    # we recompute the affine from the fixed extent + snapped dims so it is exact.
-    H = min(s[0] for s in shapes)
-    W = min(s[1] for s in shapes)
-    for bn in list(band_arrays.keys()):
-        band_arrays[bn] = band_arrays[bn][:H, :W]
-        band_masks[bn] = band_masks[bn][:H, :W]
+    # Target grid = coarsest band (fewest pixels).  actual_native_utm MUST come
+    # from that same band so the affine transform matches the pixel data exactly.
+    # Using a finer band's bounds with fewer pixels would shift every pixel.
+    H = min(a.shape[0] for a in band_arrays.values())
+    W = min(a.shape[1] for a in band_arrays.values())
+    coarsest_band = min(band_arrays, key=lambda b: band_arrays[b].size)
+    actual_native_utm = band_bounds[coarsest_band]
 
-    # Exact affine for the snapped (H, W) grid in native UTM
+    # Resample finer bands to (H, W) — PIL nearest-neighbour preserves source DNs
+    from PIL import Image as _PILImage
+    for bn in list(band_arrays.keys()):
+        arr, msk = band_arrays[bn], band_masks[bn]
+        if arr.shape[0] != H or arr.shape[1] != W:
+            arr = np.array(
+                _PILImage.fromarray(arr).resize((W, H), resample=_PILImage.NEAREST),
+                dtype=np.float32,
+            )
+            msk = np.array(
+                _PILImage.fromarray(msk).resize((W, H), resample=_PILImage.NEAREST),
+                dtype=np.uint8,
+            )
+        band_arrays[bn] = arr
+        band_masks[bn] = msk
+
+    # Exact affine for the (H, W) grid in native UTM
     from rasterio.transform import from_bounds as _from_bounds
     from rasterio import warp as _warp
     utm_transform = _from_bounds(*actual_native_utm, W, H)
@@ -222,26 +247,72 @@ def extract_bbox_features(
 
     band_1d = {k: v.ravel() for k, v in band_arrays.items()}
     for idx_name in enabled_indices:
-        spec = SPECTRAL_INDICES.get(idx_name.upper())
-        if spec is None:
+        key = idx_name.upper()
+        if key not in SPECTRAL_INDEX_CATALOGUE:
             continue
-        if not spec["requires"].issubset(set(band_arrays.keys())):
-            logger.debug("Skipping %s — missing required bands", idx_name)
-            continue
-        idx_values = spec["fn"]({k: band_1d[k] for k in band_1d}).astype(np.float32)
-        feature_cols.append(idx_values)
-        feature_names.append(idx_name.upper())
+        result = compute_index(key, band_1d)
+        if result is not None:
+            feature_cols.append(result.astype(np.float32))
+            feature_names.append(key)
+        else:
+            logger.debug("Skipping %s — missing required bands", key)
 
     if not feature_cols:
         return None, H, W, combined_mask.ravel(), feature_names, actual_bounds_wgs84, utm_transform, native_crs
 
     X = np.column_stack(feature_cols)   # (H*W, n_features)
+
+    # ── GLCM texture features ─────────────────────────────────────────────
+    # Mirrors the per-polygon logic in features.py: compute one scalar per
+    # (band, stat) pair over the entire patch (sub-sampled to GLCM_MAX_PIXELS
+    # to keep it fast), then broadcast that scalar to all H*W pixels.
+    # This MUST match training; skipping it when glcm_config is set causes a
+    # feature-count mismatch and a sklearn ValueError at predict time.
+    glcm_enabled = (
+        glcm_config is not None
+        and glcm_config.get("enabled", False)
+    )
+    if glcm_enabled:
+        glcm_bands  = glcm_config.get("bands", [])
+        window_size = int(glcm_config.get("window_size", 5))
+        statistics  = glcm_config.get(
+            "statistics",
+            ["contrast", "dissimilarity", "homogeneity", "energy", "correlation"],
+        )
+
+        # Sub-sample valid pixels to cap GLCM compute time (same cap as training)
+        compute_mask_2d = combined_mask.copy()
+        n_valid = int(combined_mask.sum())
+        if n_valid > GLCM_MAX_PIXELS:
+            rows_v, cols_v = np.where(combined_mask)
+            chosen = np.random.choice(n_valid, GLCM_MAX_PIXELS, replace=False)
+            compute_mask_2d = np.zeros_like(combined_mask)
+            compute_mask_2d[rows_v[chosen], cols_v[chosen]] = True
+
+        glcm_names: list[str] = []
+        glcm_vals:  list[float] = []
+        for band in glcm_bands:
+            if band not in band_arrays:
+                continue
+            stats = compute_glcm_features(
+                band_arrays[band], compute_mask_2d, window_size, statistics
+            )
+            for stat, val in stats.items():
+                glcm_names.append(f"glcm_{band}_{stat}")
+                glcm_vals.append(val)
+
+        if glcm_names:
+            glcm_row  = np.array(glcm_vals, dtype=np.float32)          # (n_glcm,)
+            glcm_cols = np.tile(glcm_row, (H * W, 1))                  # (H*W, n_glcm)
+            X = np.hstack([X, glcm_cols])
+            feature_names.extend(glcm_names)
+
     return X, H, W, combined_mask.ravel(), feature_names, actual_bounds_wgs84, utm_transform, native_crs
 
 
 def read_raw_bands_tiff(
     bbox: list[float],
-    signed_assets: dict,
+    sensors_assets: dict,
     available_bands: list[str],
     enabled_indices: list[str] | None = None,
     max_size: int | None = None,
@@ -261,20 +332,31 @@ def read_raw_bands_tiff(
     import rasterio
     from rasterio.io import MemoryFile
 
+    # Backward-compat: wrap legacy flat dict
+    known_collections = set(COLLECTION_BAND_TO_ASSET.keys())
+    if not any(k in known_collections for k in sensors_assets):
+        sensors_assets = {"sentinel-2-l2a": sensors_assets}
+
     band_hrefs: dict[str, str] = {}
-    for logical in available_bands:
-        asset_key = S2_BAND_TO_ASSET.get(logical)
-        if not asset_key:
-            continue
-        asset_info = signed_assets.get(asset_key)
-        if asset_info and asset_info.get("href"):
-            band_hrefs[logical] = asset_info["href"]
+    for collection, signed_assets in sensors_assets.items():
+        band_map = COLLECTION_BAND_TO_ASSET.get(collection, {})
+        for logical in available_bands:
+            if logical in band_hrefs:
+                continue
+            resolved = LEGACY_BAND_ALIASES.get(logical, logical)
+            asset_key = band_map.get(resolved) or band_map.get(logical)
+            if not asset_key:
+                continue
+            asset_info = signed_assets.get(asset_key)
+            if asset_info and asset_info.get("href"):
+                band_hrefs[logical] = asset_info["href"]
 
     if not band_hrefs:
         logger.warning("No matching assets found for bands %s", available_bands)
         return None
 
     band_arrays: dict[str, np.ndarray] = {}
+    band_bounds: dict[str, tuple] = {}          # per-band native (l,b,r,t) in UTM
     actual_bounds_utm: tuple | None = None
     native_crs = None
 
@@ -287,8 +369,8 @@ def read_raw_bands_tiff(
             band_name, arr, _mask, a_native, crs = future.result()
             if arr is not None:
                 band_arrays[band_name] = arr
-                if actual_bounds_utm is None:
-                    actual_bounds_utm = a_native
+                band_bounds[band_name] = a_native
+                if native_crs is None:
                     native_crs = crs
 
     if not band_arrays:
@@ -296,22 +378,42 @@ def read_raw_bands_tiff(
 
     H = min(a.shape[0] for a in band_arrays.values())
     W = min(a.shape[1] for a in band_arrays.values())
+
+    # actual_bounds_utm must come from the band whose pixel count equals (H, W)
+    # — the coarsest band.  Taking it from any finer-resolution band would cause
+    # the TIFF geotransform to cover the full extent while the pixel arrays only
+    # contain the top-left corner of the finer grid (spatial offset bug).
+    coarsest_band = min(band_arrays, key=lambda b: band_arrays[b].size)
+    actual_bounds_utm = band_bounds[coarsest_band]
+
     band_order = [b for b in available_bands if b in band_arrays]
-    arrays = [band_arrays[b][:H, :W] for b in band_order]
+
+    # Resample every band that is finer than (H, W) down to match.
+    # PIL nearest-neighbour preserves source DN values and is already a dep.
+    from PIL import Image as _PILImage
+    arrays = []
+    for b in band_order:
+        arr = band_arrays[b]
+        if arr.shape[0] != H or arr.shape[1] != W:
+            arr = np.array(
+                _PILImage.fromarray(arr).resize((W, H), resample=_PILImage.NEAREST),
+                dtype=np.float32,
+            )
+        arrays.append(arr)
 
     # Compute spectral indices and append as extra bands
     if enabled_indices:
-        band_1d = {b: band_arrays[b][:H, :W].ravel() for b in band_order}
+        band_1d = {b: arrays[i].ravel() for i, b in enumerate(band_order)}
         for idx_name in enabled_indices:
-            spec = SPECTRAL_INDICES.get(idx_name.upper())
-            if spec is None:
+            key = idx_name.upper()
+            if key not in SPECTRAL_INDEX_CATALOGUE:
                 continue
-            if not spec["requires"].issubset(set(band_order)):
+            result = compute_index(key, band_1d)
+            if result is not None:
+                arrays.append(result.astype(np.float32).reshape(H, W))
+                band_order.append(key)
+            else:
                 logger.debug("TIFF: skipping %s — missing required bands", idx_name)
-                continue
-            idx_arr = spec["fn"]({k: band_1d[k] for k in band_1d}).astype(np.float32).reshape(H, W)
-            arrays.append(idx_arr)
-            band_order.append(idx_name.upper())
 
     # UTM affine consistent with the snapped (H, W) grid — no WGS84 roundtrip
     from rasterio.transform import from_bounds as _fb
@@ -330,7 +432,7 @@ def read_raw_bands_tiff(
         ) as ds:
             for i, (arr, name) in enumerate(zip(arrays, band_order), start=1):
                 ds.write(arr, i)
-                ds.update_tags(i, name=name)
+                ds.set_band_description(i, name)  # sets GDAL GetDescription()
         return memfile.read()
 
 

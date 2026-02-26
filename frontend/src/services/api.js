@@ -187,7 +187,14 @@ export function getUncertaintyDownloadUrl(projectId) {
   return `${BASE}/predict/uncertainty/download/${projectId}`
 }
 
-/** Returns the URL for the debug GeoTIFF download (raw bands used for last prediction). */
+/** Fetch the full spectral index catalogue grouped by domain from the backend. */
+export async function getSpectralIndices() {
+  const r = await fetch(`${BASE}/imagery/spectral-indices`)
+  if (!r.ok) throw new Error('Failed to fetch spectral indices')
+  return r.json()
+}
+
+/** Returns the download URL for the debug GeoTIFF download (raw bands used for last prediction). */
 export function getDebugTiffUrl(projectId) {
   return `${BASE}/predict/debug-tiff/${projectId}`
 }

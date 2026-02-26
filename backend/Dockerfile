@@ -7,6 +7,7 @@ RUN apt-get update \
     libexpat1 \
     libproj25 \
     libgeos-c1t64 \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

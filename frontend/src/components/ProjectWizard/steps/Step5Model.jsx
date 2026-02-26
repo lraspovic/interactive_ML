@@ -82,6 +82,37 @@ export default function Step5Model({ formData, setFormData }) {
           </div>
         </div>
       )}
+
+      {/* JSON override — merged on top of UI values */}
+      <div className="field">
+        <label>
+          JSON Override{' '}
+          <span className="field-hint">(merged over the values above; leave blank to use UI values)</span>
+        </label>
+        <textarea
+          rows={3}
+          placeholder={'{"n_estimators": 500, "max_depth": 10}'}
+          style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}
+          onChange={e => {
+            const raw = e.target.value.trim()
+            if (!raw) {
+              e.target.style.borderColor = ''
+              return
+            }
+            try {
+              const parsed = JSON.parse(raw)
+              if (typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error()
+              setFormData(prev => ({
+                ...prev,
+                model_params: { ...prev.model_params, ...parsed },
+              }))
+              e.target.style.borderColor = ''
+            } catch {
+              e.target.style.borderColor = 'var(--color-error, #e74c3c)'
+            }
+          }}
+        />
+      </div>
     </div>
   )
 }

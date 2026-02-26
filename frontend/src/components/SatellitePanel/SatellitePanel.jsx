@@ -2,10 +2,15 @@ import React, { useState } from 'react'
 import './SatellitePanel.css'
 import { useAppContext } from '../../context/AppContext'
 import { searchStacScenes } from '../../services/api'
-import { BAND_COMBOS, MIN_SAT_ZOOM } from './bandCombos'
+import { getCombosForCollection, getDefaultComboId, MIN_SAT_ZOOM } from './bandCombos'
 
 const DEFAULT_MAX_CLOUD = 20
 const DEFAULT_COLLECTION = 'sentinel-2-l2a'
+
+const SENSOR_LABEL = {
+  'sentinel-2-l2a': 'Sentinel-2 L2A',
+  'sentinel-1-rtc': 'Sentinel-1 RTC',
+}
 
 export default function SatellitePanel() {
   const {
@@ -13,6 +18,7 @@ export default function SatellitePanel() {
     activeScene, setActiveScene,
     activeBandCombo, setActiveBandCombo,
     satelliteOpacity, setSatelliteOpacity,
+    activeProject,
   } = useAppContext()
 
   const [open, setOpen] = useState(false)
@@ -22,6 +28,15 @@ export default function SatellitePanel() {
   const [maxCloud, setMaxCloud] = useState(DEFAULT_MAX_CLOUD)
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [collection, setCollection] = useState(DEFAULT_COLLECTION)
+
+  // Sensor types enabled for the active project (may be undefined for old projects)
+  const projectSensors = activeProject?.sensors?.map(s => s.sensor_type) ?? [DEFAULT_COLLECTION]
+  // Show toggle only if the project has more than one sensor type
+  const showSensorToggle = projectSensors.length > 1
+
+  // Sentinel-1 has no cloud cover metadata — hide the control when searching S1
+  const isS1 = collection === 'sentinel-1-rtc'
 
   const canSearch = mapZoom >= MIN_SAT_ZOOM && mapBounds !== null
 
@@ -33,14 +48,14 @@ export default function SatellitePanel() {
       const { minLon, minLat, maxLon, maxLat } = mapBounds
       const results = await searchStacScenes({
         bbox: `${minLon},${minLat},${maxLon},${maxLat}`,
-        collection: DEFAULT_COLLECTION,
-        max_cloud: maxCloud,
+        collection,
+        max_cloud: isS1 ? undefined : maxCloud,
         date_from: dateFrom || undefined,
         date_to: dateTo || undefined,
         limit: 12,
       })
       setScenes(results)
-      if (results.length === 0) setError('No scenes found. Try relaxing cloud cover or date range.')
+      if (results.length === 0) setError('No scenes found. Try relaxing the date range.')
     } catch (e) {
       setError(e.message || 'Search failed')
     } finally {
@@ -48,8 +63,22 @@ export default function SatellitePanel() {
     }
   }
 
+  const switchCollection = (col) => {
+    setCollection(col)
+    setScenes([])
+    setError(null)
+    // Reset to the first valid combo for the new collection
+    setActiveBandCombo(getDefaultComboId(col))
+  }
+
   const selectScene = (scene) => {
-    setActiveScene(activeScene?.id === scene.id ? null : scene)
+    if (activeScene?.id === scene.id) {
+      setActiveScene(null)
+    } else {
+      setActiveScene(scene)
+      // Reset to first valid combo for this scene's collection
+      setActiveBandCombo(getDefaultComboId(scene.collection))
+    }
   }
 
   const clearSatellite = () => {
@@ -95,20 +124,37 @@ export default function SatellitePanel() {
 
           {canSearch && (
             <>
+              {/* Sensor toggle (only shown when project has multiple sensors) */}
+              {showSensorToggle && (
+                <div className="sat-sensor-toggle">
+                  {projectSensors.map(col => (
+                    <button
+                      key={col}
+                      className={`sat-sensor-btn${collection === col ? ' active' : ''}`}
+                      onClick={() => switchCollection(col)}
+                    >
+                      {SENSOR_LABEL[col] ?? col}
+                    </button>
+                  ))}
+                </div>
+              )}
+
               {/* Search controls */}
               <div className="sat-controls">
-                <div className="sat-row">
-                  <label>Cloud cover ≤</label>
-                  <input
-                    type="number"
-                    min="0"
-                    max="100"
-                    value={maxCloud}
-                    onChange={e => setMaxCloud(Number(e.target.value))}
-                    className="sat-input sat-input--sm"
-                  />
-                  <span>%</span>
-                </div>
+                {!isS1 && (
+                  <div className="sat-row">
+                    <label>Cloud cover ≤</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      value={maxCloud}
+                      onChange={e => setMaxCloud(Number(e.target.value))}
+                      className="sat-input sat-input--sm"
+                    />
+                    <span>%</span>
+                  </div>
+                )}
                 <div className="sat-row">
                   <label>From</label>
                   <input
@@ -146,13 +192,17 @@ export default function SatellitePanel() {
                     >
                       {scene.thumbnail
                         ? <img src={scene.thumbnail} alt="" className="sat-scene-thumb" />
-                        : <div className="sat-scene-thumb sat-scene-thumb--placeholder">S2</div>
+                        : <div className="sat-scene-thumb sat-scene-thumb--placeholder">
+                            {isS1 ? 'S1' : 'S2'}
+                          </div>
                       }
                       <div className="sat-scene-meta">
                         <span className="sat-scene-date">{scene.date}</span>
-                        <span className={`sat-scene-cloud${scene.cloud_pct > 30 ? ' high' : ''}`}>
-                          ☁ {scene.cloud_pct >= 0 ? `${scene.cloud_pct}%` : '—'}
-                        </span>
+                        {!isS1 && (
+                          <span className={`sat-scene-cloud${scene.cloud_pct > 30 ? ' high' : ''}`}>
+                            ☁ {scene.cloud_pct >= 0 ? `${scene.cloud_pct}%` : '—'}
+                          </span>
+                        )}
                       </div>
                     </button>
                   ))}
@@ -170,7 +220,7 @@ export default function SatellitePanel() {
                       onChange={e => setActiveBandCombo(e.target.value)}
                       className="sat-select"
                     >
-                      {BAND_COMBOS.map(c => (
+                      {getCombosForCollection(activeScene.collection).map(c => (
                         <option key={c.id} value={c.id}>{c.label}</option>
                       ))}
                     </select>

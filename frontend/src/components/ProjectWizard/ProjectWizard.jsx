@@ -1,47 +1,39 @@
 import React, { useState } from 'react'
 import './ProjectWizard.css'
-import { DEFAULT_CLASSES } from './wizardConstants'
+import { DEFAULT_CLASSES, DEFAULT_SENSORS } from './wizardConstants'
 import { createProject } from '../../services/api'
 import { useAppContext } from '../../context/AppContext'
-import Step1Basics  from './steps/Step1Basics'
-import Step2AOI     from './steps/Step2AOI'
-import Step3Imagery from './steps/Step3Imagery'
-import Step4Classes from './steps/Step4Classes'
-import Step5Model   from './steps/Step5Model'
+import Step1Basics   from './steps/Step1Basics'
+import Step2Sources  from './steps/Step2Sources'
+import Step3Features from './steps/Step3Features'
+import Step4Classes  from './steps/Step4Classes'
+import Step5Model    from './steps/Step5Model'
 
 const STEPS = [
   { label: 'Basics' },
-  { label: 'AOI' },
-  { label: 'Imagery' },
+  { label: 'Sources' },
+  { label: 'Features' },
   { label: 'Classes' },
   { label: 'Model' },
 ]
 
 const INITIAL_FORM = {
+  // Step 1
   name: '',
   description: '',
   task_type: 'classification',
-  aoi_bbox: null,
+  // Step 2 — sources
   imagery_url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-  available_bands: ['blue', 'green', 'red'],
+  sensors: DEFAULT_SENSORS.map(s => ({ ...s, bands: [...s.bands] })),
+  // Step 3 — features
   enabled_indices: [],
-  resolution_m: 10,
+  glcm_config: null,
+  // Step 4
   classes: DEFAULT_CLASSES.map(c => ({ ...c })),
+  // Step 5
   model_family: 'classical',
   model_type: 'random_forest',
   model_params: { n_estimators: 100, max_depth: null },
-}
-
-function bboxToGeoJSON(bbox) {
-  if (!bbox) return null
-  const { minLon, minLat, maxLon, maxLat } = bbox
-  const coords = [minLon, minLat, maxLon, maxLat].map(Number)
-  if (coords.some(n => isNaN(n))) return null
-  const [wn, s, e, n] = [coords[0], coords[1], coords[2], coords[3]]
-  return {
-    type: 'Polygon',
-    coordinates: [[[wn, s], [e, s], [e, n], [wn, n], [wn, s]]],
-  }
 }
 
 export default function ProjectWizard() {
@@ -57,15 +49,10 @@ export default function ProjectWizard() {
       if (!formData.name.trim()) errs.name = 'Project name is required.'
     }
     if (s === 2) {
-      const b = formData.aoi_bbox
-      if (b && Object.values(b).some(v => v !== '')) {
-        const { minLat, maxLat, minLon, maxLon } = b
-        if (Number(minLat) >= Number(maxLat)) errs.aoi_bbox = 'Min latitude must be less than max latitude.'
-        if (Number(minLon) >= Number(maxLon)) errs.aoi_bbox = 'Min longitude must be less than max longitude.'
-      }
-    }
-    if (s === 3) {
-      if (!formData.imagery_url.trim()) errs.imagery_url = 'Imagery URL is required.'
+      if (!formData.imagery_url.trim()) errs.imagery_url = 'Tile URL is required.'
+      if (!formData.sensors.length) errs.sensors = 'Select at least one sensor.'
+      const anyBands = formData.sensors.some(sc => sc.bands.length > 0)
+      if (!anyBands) errs.sensors = 'Select at least one band.'
     }
     if (s === 4) {
       if (formData.classes.length < 2) errs.classes = 'At least 2 classes are required.'
@@ -89,16 +76,25 @@ export default function ProjectWizard() {
 
     setSubmitting(true)
     try {
-      const aoi_geometry = bboxToGeoJSON(formData.aoi_bbox)
+      // Derive the flat available_bands list as the union of all sensor bands
+      // (required by the backend for backward-compat with feature extraction).
+      const seen = new Set()
+      const available_bands = []
+      for (const sc of formData.sensors) {
+        for (const b of sc.bands) {
+          if (!seen.has(b)) { seen.add(b); available_bands.push(b) }
+        }
+      }
+
       const payload = {
         name: formData.name.trim(),
         description: formData.description.trim() || null,
         task_type: formData.task_type,
-        aoi_geometry,
         imagery_url: formData.imagery_url.trim(),
-        available_bands: formData.available_bands,
+        sensors: formData.sensors,
+        available_bands,
         enabled_indices: formData.enabled_indices,
-        resolution_m: formData.resolution_m,
+        glcm_config: formData.glcm_config || null,
         classes: formData.classes.map((c, i) => ({ name: c.name.trim(), color: c.color, display_order: i })),
         model_config: {
           family: formData.model_family,
@@ -119,11 +115,11 @@ export default function ProjectWizard() {
   }
 
   const stepComponent = [
-    <Step1Basics  formData={formData} setFormData={setFormData} errors={errors} />,
-    <Step2AOI     formData={formData} setFormData={setFormData} errors={errors} />,
-    <Step3Imagery formData={formData} setFormData={setFormData} errors={errors} />,
-    <Step4Classes formData={formData} setFormData={setFormData} errors={errors} />,
-    <Step5Model   formData={formData} setFormData={setFormData} errors={errors} />,
+    <Step1Basics   formData={formData} setFormData={setFormData} errors={errors} />,
+    <Step2Sources  formData={formData} setFormData={setFormData} errors={errors} />,
+    <Step3Features formData={formData} setFormData={setFormData} errors={errors} />,
+    <Step4Classes  formData={formData} setFormData={setFormData} errors={errors} />,
+    <Step5Model    formData={formData} setFormData={setFormData} errors={errors} />,
   ][step - 1]
 
   return (

@@ -24,6 +24,11 @@ from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
 from rasterio import warp
 
+# S2_BAND_TO_ASSET was removed from features.py in the multi-sensor rewrite.
+# Provide a module-level alias so all test methods that reference it still work.
+from app.ml.spectral_catalogue import COLLECTION_BAND_TO_ASSET as _C2A
+S2_BAND_TO_ASSET = _C2A["sentinel-2-l2a"]
+
 
 # ---------------------------------------------------------------------------
 # Shared constants — a 1 km × 1 km patch in UTM zone 32N (Bavaria, ~10°E 47°N)
@@ -183,7 +188,6 @@ class TestExtractBboxFeatures:
 
     def _make_signed_assets(self, band_hrefs: dict[str, str]) -> dict:
         """Build a fake signed_assets dict from {logical_name: local_path}."""
-        from app.ml.features import S2_BAND_TO_ASSET
         assets = {}
         for logical, path in band_hrefs.items():
             asset_key = S2_BAND_TO_ASSET[logical]
@@ -239,7 +243,6 @@ class TestExtractBboxFeatures:
         individual band's read.
         """
         from unittest.mock import patch
-        from app.ml.features import S2_BAND_TO_ASSET
         from app.ml.predictor import extract_bbox_features
 
         # Simulate real-world sub-pixel rounding: red=100×100, nir=100×98
@@ -491,7 +494,6 @@ class TestAlignmentInvariant:
         from app.ml.predictor import extract_bbox_features
 
         signed_assets = {}
-        from app.ml.features import S2_BAND_TO_ASSET
         signed_assets[S2_BAND_TO_ASSET["red"]] = {"href": cog_path}
 
         _, H, W, _, _, actual_bounds, utm_transform, native_crs = extract_bbox_features(
@@ -567,7 +569,6 @@ class TestNativeResolutionAndExactValues:
         pixel spacing when the source is a 10 m COG.
         """
         from app.ml.predictor import extract_bbox_features
-        from app.ml.features import S2_BAND_TO_ASSET
 
         p = str(tmp_path / "gsd.tif")
         self._make_distinctive_cog(p)
@@ -628,7 +629,6 @@ class TestNativeResolutionAndExactValues:
         """read_raw_bands_tiff with default max_size=None must use native dimensions."""
         import io
         from app.ml.predictor import read_raw_bands_tiff
-        from app.ml.features import S2_BAND_TO_ASSET
 
         p = str(tmp_path / "raw.tif")
         self._make_distinctive_cog(p)
@@ -644,7 +644,6 @@ class TestNativeResolutionAndExactValues:
         """Pixels in the raw bands TIFF must match the source fill value exactly."""
         import io
         from app.ml.predictor import read_raw_bands_tiff
-        from app.ml.features import S2_BAND_TO_ASSET
 
         p = str(tmp_path / "rawval.tif")
         self._make_distinctive_cog(p)
@@ -663,7 +662,6 @@ class TestNativeResolutionAndExactValues:
         """The GSD in the raw bands TIFF transform must equal the source pixel spacing."""
         import io
         from app.ml.predictor import read_raw_bands_tiff
-        from app.ml.features import S2_BAND_TO_ASSET
 
         p = str(tmp_path / "rawgsd.tif")
         self._make_distinctive_cog(p)

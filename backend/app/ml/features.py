@@ -20,10 +20,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Target ground sample distance used for all feature reads.
-# Every band (10 m or 20 m native) is resampled to this resolution so that
-# pixel indices are spatially aligned across all bands.
-TARGET_GSD = 10.0  # metres
+# Reference GSD for documentation only — the actual output shape is now derived
+# from the native window pixel count so values match the source DN exactly.
+TARGET_GSD = 10.0  # metres (informational; not used for shape computation)
 
 # Logical band name (from wizard Step 3) → Sentinel-2 L2A STAC asset key.
 # Only Sentinel-2 L2A is supported for now; extend this map for other collections.
@@ -77,19 +76,22 @@ def _read_band_pixels(
     geometry: dict,
     band_name: str,
     target_shape: tuple[int, int] | None = None,
-) -> tuple[str, np.ndarray | None, np.ndarray | None]:
+) -> tuple[str, np.ndarray | None, np.ndarray | None, Any | None, Any | None]:
     """
     Read pixels inside *geometry* from one COG asset.
 
-    All bands are resampled to *target_shape* (rows, cols) so that pixel
-    indices are spatially aligned regardless of native band resolution
-    (e.g. 10 m vs 20 m Sentinel-2 bands).
+    When *target_shape* is None the output shape is derived from the native
+    window pixel count (``round(win.height) × round(win.width)``), which
+    preserves the original DN values with no interpolation.  When a shared
+    *target_shape* is supplied (to align a 20 m band onto a 10 m grid) nearest-
+    neighbour resampling is used so each output pixel still carries an original
+    source DN — never an interpolated value.
 
     Uses HTTP range requests — only the bytes covering the polygon bbox
     are downloaded from Azure Blob Storage.
 
-    Returns (band_name, 2D float32 array, 2D bool valid_mask)
-    or (band_name, None, None) on failure.
+    Returns (band_name, 2D float32 array, 2D bool valid_mask, out_transform, native_crs)
+    or (band_name, None, None, None, None) on failure.
     """
     import rasterio
     import rasterio.features as rio_feat
@@ -107,25 +109,27 @@ def _read_band_pixels(
             win = windows.from_bounds(*native_bounds, transform=ds.transform)
             win = win.intersection(windows.Window(0, 0, ds.width, ds.height))
             if win.width <= 0 or win.height <= 0:
-                return band_name, None, None
+                return band_name, None, None, None, None
 
-            # Determine output shape: use caller-supplied target or derive from
-            # the native extent at TARGET_GSD so every band lands on the same grid.
+            # Determine output shape.
+            # When no target is supplied, use the native pixel count of the window
+            # so the read is lossless (no interpolation, exact source DN values).
+            # When a shared target is supplied (aligning a 20 m band to a 10 m
+            # grid), nearest-neighbour resampling is used so each output pixel
+            # still holds an original source value.
             if target_shape is None:
-                extent_x = native_bounds[2] - native_bounds[0]
-                extent_y = native_bounds[3] - native_bounds[1]
-                tgt_w = max(1, round(extent_x / TARGET_GSD))
-                tgt_h = max(1, round(extent_y / TARGET_GSD))
+                tgt_h = max(1, round(win.height))
+                tgt_w = max(1, round(win.width))
                 target_shape = (tgt_h, tgt_w)
 
             out_h, out_w = target_shape
 
-            # Read at target_shape — rasterio bilinear-resamples 20 m → 10 m
+            # nearest preserves original DN values; no interpolation artefacts
             data = ds.read(
                 1,
                 window=win,
                 out_shape=(out_h, out_w),
-                resampling=rasterio.enums.Resampling.bilinear,
+                resampling=rasterio.enums.Resampling.nearest,
             ).astype(np.float32)
 
             # Transform for the resampled output grid
@@ -147,12 +151,14 @@ def _read_band_pixels(
             nodata_val = ds.nodata if ds.nodata is not None else 0
             valid = poly_mask & (data != nodata_val)
             if not valid.any():
-                return band_name, None, None
+                return band_name, None, None, None, None
 
-        return band_name, data, valid
+            crs = ds.crs
+
+        return band_name, data, valid, out_transform, crs
     except Exception as exc:
         logger.warning("Feature read failed for band %s: %s", band_name, exc)
-        return band_name, None, None
+        return band_name, None, None, None, None
 
 
 def extract_pixel_features(
@@ -160,7 +166,7 @@ def extract_pixel_features(
     signed_assets: dict,
     available_bands: list[str],
     enabled_indices: list[str],
-) -> tuple[np.ndarray | None, list[str]]:
+) -> tuple[np.ndarray | None, list[str], np.ndarray | None]:
     """
     Extract a (n_valid_pixels, n_features) float32 feature matrix for one polygon.
 
@@ -173,7 +179,9 @@ def extract_pixel_features(
 
     Returns
     -------
-    (X, feature_names) — X is None if no valid pixels were found inside the polygon.
+    (X, feature_names, coords_wgs84) — X is None if no valid pixels were found.
+    coords_wgs84 is a (n_pixels, 2) float64 array of [lon, lat] pixel centroid
+    coordinates in WGS84, or None if centroids could not be computed.
     """
     # Resolve logical band names to signed asset hrefs
     band_hrefs: dict[str, str] = {}
@@ -187,24 +195,26 @@ def extract_pixel_features(
 
     if not band_hrefs:
         logger.warning("No matching assets found for bands %s", available_bands)
-        return None, []
+        return None, [], None
 
-    # Pre-compute a shared target_shape at TARGET_GSD from the first available
-    # band's native UTM extent.  All bands (10 m and 20 m native) will be read
-    # at this same grid so pixel indices are spatially consistent.
+    # Pre-compute a shared target_shape from the first available band's native
+    # window pixel count.  Opening the finest-resolution band (a 10 m S2 band)
+    # produces the reference grid; coarser 20 m bands are later nearest-neighbour
+    # upsampled to this same grid so all pixel vectors share the same spatial index
+    # while each value is still an uninterpolated source DN.
     target_shape: tuple[int, int] | None = None
     try:
         import rasterio
         import rasterio.features as rio_feat
-        from rasterio import warp
+        from rasterio import warp, windows as rio_windows
         first_href = next(iter(band_hrefs.values()))
         aoi_bounds = rio_feat.bounds(geometry)
         with rasterio.open(first_href) as ds:
             native_bounds = warp.transform_bounds("epsg:4326", ds.crs, *aoi_bounds)
-        extent_x = native_bounds[2] - native_bounds[0]
-        extent_y = native_bounds[3] - native_bounds[1]
-        tgt_w = max(1, round(extent_x / TARGET_GSD))
-        tgt_h = max(1, round(extent_y / TARGET_GSD))
+            win0 = rio_windows.from_bounds(*native_bounds, transform=ds.transform)
+            win0 = win0.intersection(rio_windows.Window(0, 0, ds.width, ds.height))
+        tgt_h = max(1, round(win0.height))
+        tgt_w = max(1, round(win0.width))
         target_shape = (tgt_h, tgt_w)
     except Exception as exc:
         logger.warning("Could not pre-compute target_shape, falling back to native: %s", exc)
@@ -212,19 +222,26 @@ def extract_pixel_features(
     # Fetch all bands in parallel, resampled to the shared target_shape
     band_arrays: dict[str, np.ndarray] = {}   # 2D float32
     band_masks:  dict[str, np.ndarray] = {}   # 2D bool (valid pixels)
+    # Capture the pixel grid transform + CRS from the first successful band read.
+    # All bands share the same native_bounds and target_shape, so transforms match.
+    pixel_grid_transform = None
+    pixel_grid_crs = None
     with ThreadPoolExecutor(max_workers=len(band_hrefs)) as pool:
         futures = {
             pool.submit(_read_band_pixels, href, geometry, band_name, target_shape): band_name
             for band_name, href in band_hrefs.items()
         }
         for future in as_completed(futures):
-            band_name, arr, valid = future.result()
+            band_name, arr, valid, t, crs = future.result()
             if arr is not None:
                 band_arrays[band_name] = arr
                 band_masks[band_name]  = valid
+                if pixel_grid_transform is None:
+                    pixel_grid_transform = t
+                    pixel_grid_crs = crs
 
     if not band_arrays:
-        return None, []
+        return None, [], None
 
     # Intersect all valid masks so every feature row refers to the same ground pixel.
     # A pixel is included only if it is valid (inside polygon, not nodata) in ALL bands.
@@ -234,7 +251,7 @@ def extract_pixel_features(
 
     n_pixels = int(combined_mask.sum())
     if n_pixels == 0:
-        return None, []
+        return None, [], None
 
     # Build feature columns: raw bands first (in project order), then indices
     feature_cols: list[np.ndarray] = []
@@ -263,7 +280,30 @@ def extract_pixel_features(
         feature_names.append(idx_name.upper())  # normalize to uppercase for display
 
     if not feature_cols:
-        return None, feature_names
+        return None, feature_names, None
 
     X = np.column_stack(feature_cols)  # (n_pixels, n_features)
-    return X, feature_names
+
+    # ── Compute WGS84 pixel centroids ─────────────────────────────────────
+    coords_wgs84: np.ndarray | None = None
+    if pixel_grid_transform is not None and pixel_grid_crs is not None:
+        try:
+            from rasterio.transform import xy as rio_xy
+            from pyproj import Transformer as ProjTransformer
+
+            rows_idx, cols_idx = np.where(combined_mask)
+            # xy() returns pixel centres (default offset='center')
+            xs_native, ys_native = rio_xy(pixel_grid_transform, rows_idx, cols_idx)
+            to_wgs84 = ProjTransformer.from_crs(
+                pixel_grid_crs, "epsg:4326", always_xy=True
+            )
+            lons, lats = to_wgs84.transform(xs_native, ys_native)
+            coords_wgs84 = np.column_stack(
+                [np.asarray(lons, dtype=np.float64),
+                 np.asarray(lats, dtype=np.float64)]
+            )
+        except Exception as exc:
+            logger.warning("Could not compute pixel centroids: %s", exc)
+            coords_wgs84 = None
+
+    return X, feature_names, coords_wgs84

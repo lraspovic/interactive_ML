@@ -167,14 +167,24 @@ export async function getPredictStatus(projectId) {
   return r.json()
 }
 
-/** Returns the URL for the latest classification PNG (add ?t=bust for cache-busting). */
-export function getPredictImageUrl(projectId, bust) {
-  return `${BASE}/predict/image/${projectId}?t=${bust}`
+/** Returns a Leaflet TileLayer URL template for the prediction classification map. */
+export function getPredictTileUrl(projectId, bust) {
+  return `${BASE}/predict/tiles/{z}/{x}/{y}?project_id=${projectId}&t=${bust}`
 }
 
-/** Returns the URL for the latest uncertainty heatmap PNG. */
-export function getUncertaintyImageUrl(projectId, bust) {
-  return `${BASE}/predict/uncertainty/${projectId}?t=${bust}`
+/** Returns a Leaflet TileLayer URL template for the uncertainty heatmap. */
+export function getUncertaintyTileUrl(projectId, bust) {
+  return `${BASE}/predict/uncertainty/tiles/{z}/{x}/{y}?project_id=${projectId}&t=${bust}`
+}
+
+/** Returns the download URL for the prediction COG (uint16 class IDs, EPSG:3857). */
+export function getPredictDownloadUrl(projectId) {
+  return `${BASE}/predict/download/${projectId}`
+}
+
+/** Returns the download URL for the uncertainty COG (float32 normalised entropy, EPSG:3857). */
+export function getUncertaintyDownloadUrl(projectId) {
+  return `${BASE}/predict/uncertainty/download/${projectId}`
 }
 
 /** Returns the URL for the debug GeoTIFF download (raw bands used for last prediction). */

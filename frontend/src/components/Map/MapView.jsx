@@ -1,4 +1,4 @@
-import { MapContainer, TileLayer, ImageOverlay } from "react-leaflet";
+import { MapContainer, TileLayer } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import "./MapView.css";
 import GeomanControl from "./GeomanControl";
@@ -7,7 +7,7 @@ import TrainingLayer from "./TrainingLayer";
 import MapEventHandler from "./MapEventHandler";
 import { useAppContext } from "../../context/AppContext";
 import { buildSatTileUrl, MIN_SAT_ZOOM } from "../SatellitePanel/bandCombos";
-import { getPredictImageUrl, getUncertaintyImageUrl } from "../../services/api";
+import { getPredictTileUrl, getUncertaintyTileUrl } from "../../services/api";
 
 // Default center: roughly central Europe / global overview
 const DEFAULT_CENTER = [48.0, 16.0];
@@ -28,16 +28,6 @@ export default function MapView() {
     activeScene && mapZoom >= MIN_SAT_ZOOM
       ? buildSatTileUrl(activeScene, activeBandCombo)
       : null;
-
-  // Use actual raster bounds (from rio_tiler pixel snapping) when available;
-  // fall back to the requested bbox. Format: [[minlat, minlon], [maxlat, maxlon]]
-  const _bb = prediction?.actual_bbox ?? prediction?.bbox;
-  const overlayBounds = _bb
-    ? [
-        [_bb[1], _bb[0]],
-        [_bb[3], _bb[2]],
-      ]
-    : null;
 
   return (
     <div className="map-container">
@@ -65,25 +55,22 @@ export default function MapView() {
             attribution="Imagery &copy; Microsoft Planetary Computer / ESA Sentinel-2"
           />
         )}
-        {overlayBounds && prediction?.timestamp && (
-          <ImageOverlay
+        {prediction?.timestamp && (
+          <TileLayer
             key={`pred-${prediction.timestamp}`}
-            url={getPredictImageUrl(activeProject?.id, prediction.timestamp)}
-            bounds={overlayBounds}
+            url={getPredictTileUrl(activeProject?.id, prediction.timestamp)}
             opacity={predictionOpacity}
             zIndex={400}
+            tileSize={256}
           />
         )}
-        {overlayBounds && prediction?.timestamp && (
-          <ImageOverlay
+        {prediction?.timestamp && (
+          <TileLayer
             key={`unc-${prediction.timestamp}`}
-            url={getUncertaintyImageUrl(
-              activeProject?.id,
-              prediction.timestamp,
-            )}
-            bounds={overlayBounds}
+            url={getUncertaintyTileUrl(activeProject?.id, prediction.timestamp)}
             opacity={uncertaintyOpacity}
             zIndex={401}
+            tileSize={256}
           />
         )}
         <MapEventHandler />

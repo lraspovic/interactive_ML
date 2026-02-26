@@ -103,6 +103,9 @@ class TrainingFeatures(Base):
     feature_names = Column(JSONB, nullable=False)   # list[str]
     n_pixels = Column(Integer, nullable=False)
     feature_data = Column(LargeBinary, nullable=False)  # numpy bytes
+    # (n_pixels, 2) float64 array [lon, lat] per pixel, serialised with np.save().
+    # NULL for rows extracted before this column was added.
+    pixel_centroids = Column(LargeBinary, nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
